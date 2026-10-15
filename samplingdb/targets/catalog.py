@@ -2,6 +2,7 @@
 
 # Libraries
 from .mixtures import BracketTwoModes, EightGaussians, GMM40, ManyModes, MoS, TwoModes
+from .particles import DW4, LJ13, LJ55
 from .synthetic import Funnel, ManyWell
 from .toys import Checkerboard, Rings
 
@@ -25,6 +26,11 @@ CATALOG = {
     'eightgaussians': {'cls': EightGaussians, 'kwargs': {}, 'data': False},
     'rings': {'cls': Rings, 'kwargs': {}, 'data': False},
     'checkerboard': {'cls': Checkerboard, 'kwargs': {}, 'data': False},
+
+    # Tier 1: many-particle systems with released reference splits
+    'dw4': {'cls': DW4, 'kwargs': {}, 'data': False},
+    'lj13': {'cls': LJ13, 'kwargs': {}, 'data': False},
+    'lj55': {'cls': LJ55, 'kwargs': {}, 'data': False},
 }
 
 
