@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "samplingdb"
+dynamic = ["version"]
+description = "Unnormalised sampling targets with train/test splits, and metrics for weighted samples"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "numpy>=2.0",
+    "scipy",
+    "pot",
+]
+
+# molecular carries everything the peptide tier needs: openmm and mdtraj to build a system,
+# huggingface_hub to fetch the pinned inputs, deeptime for the one-off TICA fit
+[project.optional-dependencies]
+molecular = ["openmm", "mdtraj", "huggingface_hub", "deeptime"]
+dev = ["pytest", "scikit-learn"]
+
+[tool.setuptools.dynamic]
+version = {attr = "samplingdb.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["samplingdb*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
