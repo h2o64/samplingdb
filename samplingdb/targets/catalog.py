@@ -5,6 +5,7 @@ from ..data import REFERENCE_CHECKSUMS, fetch_reference
 from .bayesian import LOGISTIC_DATASETS, Brownian, LGCP, LogisticRegression, Seeds
 from .mixtures import BracketTwoModes, EightGaussians, GMM40, ManyModes, MoS, TwoModes
 from .particles import DW4, LJ13, LJ55
+from .physics import KobAndersen2D, KobAndersenBinary
 from .synthetic import Funnel, ManyWell
 from .toys import Checkerboard, Rings
 
@@ -41,7 +42,15 @@ CATALOG = {
     # whitened one is the geometry Stan samples efficiently
     'lgcp': {'cls': LGCP, 'kwargs': {}, 'data': True},
     'lgcp-whitened': {'cls': LGCP, 'kwargs': {'whitened': True}, 'data': True},
+
+    # Tier 4: glass formers
+    'ka-ternary-N44-T1.0': {'cls': KobAndersen2D, 'kwargs': {'temperature': 1.0}, 'data': False},
+    'ka-ternary-N44-T0.32': {'cls': KobAndersen2D, 'kwargs': {'temperature': 0.32},
+                             'data': False},
+    'ka-binary-N64-T0.2': {'cls': KobAndersenBinary, 'kwargs': {'temperature': 0.2},
+                           'data': False},
 }
+
 # Tier 2's four logistic regressions, one per UCI dataset
 CATALOG.update({
     dataset.replace('_', '-'): {'cls': LogisticRegression, 'kwargs': {'dataset': dataset},
