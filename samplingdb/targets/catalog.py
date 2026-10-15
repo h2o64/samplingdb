@@ -3,6 +3,7 @@
 # Libraries
 from .bayesian import LOGISTIC_DATASETS, Brownian, LGCP, LogisticRegression, Seeds
 from .mixtures import BracketTwoModes, EightGaussians, GMM40, ManyModes, MoS, TwoModes
+from .molecular import PEPTIDE_SYSTEMS, Peptide
 from .particles import DW4, LJ13, LJ55
 from .physics import KobAndersen2D, KobAndersenBinary
 from .synthetic import Funnel, ManyWell
@@ -53,6 +54,31 @@ CATALOG.update({
     dataset.replace('_', '-'): {'cls': LogisticRegression, 'kwargs': {'dataset': dataset},
                                 'data': True}
     for dataset in LOGISTIC_DATASETS
+})
+
+# Tier 3's five peptides. Each is a sequence of the released Sequential Boltzmann Generators data,
+# so it is an entry rather than a class: aldp is the alanine dipeptide of Kohler et al. 2021, ala4
+# is the Ala4 of Nam et al. 2025, whose eight metastable states are the sign combinations of its
+# three phi torsions, and chignolin is the folding system no short trajectory can get the
+# populations of.
+#
+# WARNING: aldp here is NOT the ff96 + OBC1 variant that fab-torch evaluates against the REMD
+# ensemble of Midgley et al. 2023. Same molecule, same atom count, same temperature, different
+# force field and therefore a different density. Numbers do not transfer between them.
+#
+# WARNING: trialanine and hexaalanine are UNCAPPED, so mdtraj's phi and psi are offset by one
+# residue; see OpenMMTarget.build_torsion_indexes. The capped trialanine is ala4, a different
+# density. Trialanine and hexaalanine are the catalog's one chain-length ladder at fixed spec.
+PEPTIDE_NAMES = {
+    'aldp': 'Ace-A-Nme',
+    'ala4': 'Ace-AAA-Nme',
+    'trialanine': 'AAA',
+    'hexaalanine': 'AAAAAA',
+    'chignolin': 'GYDPETGTWG',
+}
+CATALOG.update({
+    name: {'cls': Peptide, 'kwargs': {'sequence': sequence}, 'data': True}
+    for name, sequence in PEPTIDE_NAMES.items()
 })
 
 

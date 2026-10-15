@@ -10,6 +10,9 @@ from .mixtures import (
     MOG, BracketTwoModes, EightGaussians, GMM40, ManyModes, Mixture, MoS, TwoModes,
     log_prob_gaussian,
 )
+from .molecular import (
+    OpenMMTarget, PEPTIDE_SYSTEMS, Peptide, center, dihedral,
+)
 from .physics import (
     KobAndersen2D, KobAndersenBinary, PeriodicPairMixture, swap_monte_carlo,
 )
@@ -18,4 +21,4 @@ from .particles import (
 )
 from .synthetic import Funnel, ManyWell
 from .toys import Checkerboard, Rings
-from .catalog import CATALOG, build, catalog
+from .catalog import CATALOG, PEPTIDE_NAMES, build, catalog
