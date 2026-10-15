@@ -1,0 +1,19 @@
+# Environments and build products
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.DS_Store
+
+# Reference sets and other generated data live in the cache, never in the repository
+*.npy
+*.npz
+*.pt
+*.h5
+!samplingdb/targets/assets/*.npy
+
+# CmdStan compiles each model to a binary next to its .stan file
+gen/stan/*
+!gen/stan/*.stan
+!gen/stan/generate.py
