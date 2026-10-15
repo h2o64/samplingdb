@@ -4,6 +4,7 @@
 from ..data import REFERENCE_CHECKSUMS, fetch_reference
 from .bayesian import LOGISTIC_DATASETS, Brownian, LGCP, LogisticRegression, Seeds
 from .mixtures import BracketTwoModes, EightGaussians, GMM40, ManyModes, MoS, TwoModes
+from .molecular import PEPTIDE_SYSTEMS, Peptide
 from .particles import DW4, LJ13, LJ55
 from .physics import KobAndersen2D, KobAndersenBinary
 from .synthetic import Funnel, ManyWell
@@ -56,6 +57,23 @@ CATALOG.update({
     dataset.replace('_', '-'): {'cls': LogisticRegression, 'kwargs': {'dataset': dataset},
                                 'data': True}
     for dataset in LOGISTIC_DATASETS
+})
+
+# Tier 3's four peptides, one per sequence of the released Sequential Boltzmann Generators data,
+# named by sequence and temperature because they come in two force-field families. ace-a-nme-T300
+# is the alanine dipeptide of Kohler et al. 2021 and ace-aaa-nme-T300 the Ala4 of Nam et al. 2025.
+#
+# WARNING: ace-a-nme-T300 is NOT the ff96 + OBC1 variant that fab-torch evaluates against the REMD
+# ensemble of Midgley et al. 2023. Same molecule, same atom count, same temperature, different
+# force field and therefore a different density. Numbers do not transfer between them.
+#
+# WARNING: aaa-T310 and aaaaaa-T310 are UNCAPPED, so mdtraj's phi and psi are offset by one
+# residue; see Peptide.build_torsion_indexes. They are the catalog's one chain-length ladder at
+# fixed specification.
+CATALOG.update({
+    sequence.lower() + '-T' + str(int(system['temperature'])):
+        {'cls': Peptide, 'kwargs': {'sequence': sequence}, 'data': True}
+    for sequence, system in PEPTIDE_SYSTEMS.items()
 })
 
 
