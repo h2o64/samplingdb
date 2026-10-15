@@ -1,7 +1,7 @@
 # samplingdb: unnormalised sampling targets with train/test splits, and metrics for their samples
 
 # Libraries
-from . import data, metrics
+from . import baselines, data, metrics
 from .targets import (
     ExactTarget, ModeCoverage, Target,
 )
