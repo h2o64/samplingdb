@@ -2,6 +2,9 @@
 
 # Libraries
 from . import data, metrics
+from .targets import (
+    ExactTarget, ModeCoverage, Target,
+)
 
 # The single source of the version: pyproject.toml reads this attribute rather than repeating it
 __version__ = '0.3.0'
