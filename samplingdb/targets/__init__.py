@@ -10,6 +10,9 @@ from .mixtures import (
     MOG, BracketTwoModes, EightGaussians, GMM40, ManyModes, Mixture, MoS, TwoModes,
     log_prob_gaussian,
 )
+from .physics import (
+    KobAndersen2D, KobAndersenBinary, PeriodicPairMixture, swap_monte_carlo,
+)
 from .particles import (
     DW4, LJ13, LJ55, LennardJones, MultiDoubleWell, ParticleTarget, remove_mean,
 )
