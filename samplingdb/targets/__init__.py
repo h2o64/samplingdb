@@ -3,6 +3,9 @@
 # Libraries
 from .base import ExactTarget, Target, score_autograd, spec_id
 from .modes import ModeCoverage
+from .bayesian import (
+    LOGISTIC_DATASETS, BayesianTarget, Brownian, LGCP, LogisticRegression, Seeds,
+)
 from .mixtures import (
     MOG, BracketTwoModes, EightGaussians, GMM40, ManyModes, Mixture, MoS, TwoModes,
     log_prob_gaussian,
