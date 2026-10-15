@@ -1,6 +1,7 @@
 # The catalog: every target this library ships, under the name it is cited by
 
 # Libraries
+from .bayesian import LOGISTIC_DATASETS, Brownian, LGCP, LogisticRegression, Seeds
 from .mixtures import BracketTwoModes, EightGaussians, GMM40, ManyModes, MoS, TwoModes
 from .particles import DW4, LJ13, LJ55
 from .synthetic import Funnel, ManyWell
@@ -31,7 +32,22 @@ CATALOG = {
     'dw4': {'cls': DW4, 'kwargs': {}, 'data': False},
     'lj13': {'cls': LJ13, 'kwargs': {}, 'data': False},
     'lj55': {'cls': LJ55, 'kwargs': {}, 'data': False},
+
+    # Tier 2: Bayesian posteriors, referenced against Stan
+    'seeds': {'cls': Seeds, 'kwargs': {}, 'data': False},
+    'brownian': {'cls': Brownian, 'kwargs': {}, 'data': False},
+    # Both LGCP geometries are catalogued: the direct one is what the literature reports, and the
+    # whitened one is the only one Stan can actually sample in a sane budget
+    'lgcp': {'cls': LGCP, 'kwargs': {}, 'data': True},
+    'lgcp-whitened': {'cls': LGCP, 'kwargs': {'whitened': True}, 'data': True},
 }
+
+# Tier 2's four logistic regressions, one per UCI dataset
+CATALOG.update({
+    dataset.replace('_', '-'): {'cls': LogisticRegression, 'kwargs': {'dataset': dataset},
+                                'data': True}
+    for dataset in LOGISTIC_DATASETS
+})
 
 
 def build(name, **kwargs):
