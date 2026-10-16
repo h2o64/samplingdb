@@ -304,6 +304,31 @@ def test_a_frozen_run_reproduces_the_calibration_it_came_from():
         < 0.3 * calibrated['round_trip_rate']
 
 
+def test_a_frozen_run_continues_from_its_rung_state():
+    """A run split into segments is the same chain as one run, which is what lets a shard save as it
+    goes: the rung-ordered state puts every configuration back on the rung it left"""
+    log_prob, score, _ = shifted_gaussian(dim=4)
+    reference = GaussianReference(4, scale=1.0)
+    x0 = reference.sample(6 * 32, generator=generator(0)).reshape(6, 32, 4)
+    beta = linear_schedule(6)
+    frozen = dict(n_rounds=1, reference=reference, step_size=0.3, adaptation_gain=0.0, thin=1,
+                  return_diagnostics=True)
+
+    kept, first = non_reversible_parallel_tempering(log_prob, score, x0, beta, n_scans=64,
+                                                    generator=generator(1), **frozen)
+
+    # The last kept state is the beta = 1 rung of the rung-ordered state, and the machine-ordered
+    # one holds the same configurations in another order
+    assert torch.equal(kept[-1], first['rung_state'][-1])
+    assert torch.equal(first['rung_state'].sort(0).values, first['state'].sort(0).values)
+
+    # Continuing from it keeps every rung in its ensemble: the cold rung's mean stays at the target's
+    _, second = non_reversible_parallel_tempering(log_prob, score, first['rung_state'], beta,
+                                                  n_scans=256, generator=generator(2), **frozen)
+    assert abs(second['barrier'] - first['barrier']) < 0.3 * first['barrier']
+    assert abs(float(second['rung_state'][-1].mean()) - 2.0) < 0.3
+
+
 def test_independent_runs_concatenate_without_lengthening_the_correlation():
     """The exactness claim gen/merge_shards.py rests on: effective sample sizes ADD
 

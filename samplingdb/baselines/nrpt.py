@@ -445,7 +445,10 @@ def non_reversible_parallel_tempering(log_prob, score, x0, beta, explorer=None, 
                 then nothing relaxes and no burn-in can rescue it: measured on dw4, freezing from a
                 cold start gave Lambda 4.42 and explorer acceptance 0.028 where the same schedule
                 from an equilibrated state gave 1.65 and 0.644 against a calibrated 1.76 and 0.65 --
-                and 'rounds' the per-round history
+                'rung_state' the same configurations in rung order, of shape (n_rungs, n_chains,
+                dim), which is the x0 that continues a frozen run where it stopped ('state' is in
+                machine order, so passing it back would put configurations on rungs they were not
+                equilibrated at), and 'rounds' the per-round history
     """
     n_rungs, n_chains, dim = x0.shape
     device, dtype = x0.device, x0.dtype
@@ -660,6 +663,7 @@ def non_reversible_parallel_tempering(log_prob, score, x0, beta, explorer=None, 
             'ideal_scans_per_round_trip': n_rungs * (2.0 + 2.0 * barrier),
             'log_normaliser': history[-1]['log_normaliser'],
             'state': x.clone(),
+            'rung_state': x[machine, chains].clone(),
             'rounds': history,
         }
         return out, diagnostics
