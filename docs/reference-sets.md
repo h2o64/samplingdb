@@ -63,8 +63,10 @@ at the hot levels.
 Before anything is written, every (level, chain) pair must accept more than 1% of its local moves,
 every chain must make `--min_round_trips` (10) round trips, every pair of adjacent levels must
 reject fewer than 95% of its swaps, and more than half of the stored states must be effectively
-independent. Independence is measured on the energy, the mean pair distance and the 10%, 50% and 90%
-quantiles of the sorted pair distances.
+independent. A shard skips that last check and leaves it to the merge: one shard's estimate is
+too noisy to gate on, and a shard that failed it would lose its states. Independence is measured
+on the energy, the mean pair distance and the 10%, 50% and 90% quantiles of the sorted pair
+distances.
 
 This generator is not used for the peptides: HMC with unit masses on Cartesian coordinates lets the
 bond vibrations set the step size, and the conformation does not move.

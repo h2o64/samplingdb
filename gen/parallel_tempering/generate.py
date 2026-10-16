@@ -299,7 +299,11 @@ print('between-chain check: tau %.2f on %s (1 is independent)'
       % (dispersion['tau'], dispersion['name']))
 print('effective sample size %.0f of %d stored (%.0f%%)'
       % (ess['n_effective'], n_keep * args.n_chains, 100 * ess['efficiency']))
-assert args.calibrate or ess['efficiency'] > 0.5, (
+
+# A shard is not a reference set: gen/merge_shards.py gates the merged one, on every chain of every
+# shard. One shard's own estimate is too noisy to gate on -- 43 binary-glass shards of 42 chains at
+# one thin read anywhere from 29% to 73% -- and a shard that missed would lose its states
+assert args.calibrate or args.shard is not None or ess['efficiency'] > 0.5, (
     'the stored set is worth %.0f%% of its length: raise --thin to about %d, or raise --n_local '
     'if the round-trip rate is far below what the barrier allows'
     % (100 * ess['efficiency'], int(args.thin * ess['tau']) + 1)
