@@ -475,6 +475,11 @@ def test_the_input_dtype_does_not_set_the_working_precision():
     target = peptide('Ace-A-Nme')
     x = reference_ensemble(target, n=8).to(torch.float64)
 
+    # The generated ensemble is stored in float32, which a cast to float32 reproduces exactly, so
+    # give the coordinates digits that float32 cannot hold
+    noise = torch.randn(x.shape, generator=torch.Generator().manual_seed(0), dtype=x.dtype)
+    x = x + 1e-6 * noise.to(x.device)
+
     # A float32 input still comes back at the module's precision, and its digits are gone
     assert target.bridge.energy(x.to(torch.float32)).dtype == torch.float64
     lost = (target.bridge.energy(x.to(torch.float32)) - target.bridge.energy(x)).abs().max()
