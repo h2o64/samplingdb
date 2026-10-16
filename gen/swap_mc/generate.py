@@ -53,11 +53,15 @@ print('tau_alpha %.0f time units (measured): equilibrate %d, store every %d, so 
       % (tau, n_equilibrate, n_between,
          args.n_chains * (n_equilibrate + args.n_configurations * n_between)))
 
-# --merge concatenates the shards into the reference set the target reads, in shard order
+# --merge interleaves the shards into the reference set the target reads: configuration by
+# configuration, every chain of every shard, so reading the first n samples spans all the chains.
+# A shard stopped early contributes only the configurations every shard holds
 if args.merge:
     shards = sorted(folder.glob(target.name + '_shard*.npy'))
     assert shards, 'no shards to merge in ' + str(folder)
-    array = np.concatenate([np.load(path) for path in shards])
+    blocks = [np.load(path) for path in shards]
+    n_keep = min(len(block) for block in blocks)
+    array = np.concatenate([block[:n_keep] for block in blocks], axis=1).reshape(-1, target.dim)
     path = folder / (target.reference_key() + '.npy')
 
     # The specific heat is the acceptance criterion, following Jung et al 2024: it needs
@@ -78,7 +82,7 @@ if args.merge:
 
     np.save(path, array)
     protocol = dict(config)
-    protocol.update({'n_samples': len(array), 'n_shards_merged': len(shards),
+    protocol.update({'n_samples': len(array), 'n_shards_merged': len(shards), 'n_keep': n_keep,
                      'shards': [p.name for p in shards], 'tau_alpha': tau,
                      'specific_heat': cv, 'specific_heat_halves': halves,
                      'torch': torch.__version__})
@@ -128,8 +132,8 @@ for step in range(args.n_configurations):
              float(stacked.var(unbiased=True)) / (target.n_particles * args.temperature ** 2),
              time.time() - start), flush=True)
 
-    # Interleave by configuration, so reading the first n samples spans every chain and every time
-    array = torch.stack(samples).reshape(-1, target.dim).cpu().numpy()
+    # Keep the configuration and chain axes apart, so the merge can interleave every shard's chains
+    array = torch.stack(samples).cpu().numpy()
     np.save(path, array)
 
 print('wrote %s  %s in %.0f s' % (path, array.shape, time.time() - start))
