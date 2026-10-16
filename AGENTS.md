@@ -44,7 +44,7 @@ references, Tier 2 (the seven Bayesian posteriors on Stan draws, each with the m
 literature reports), Tier 3 (the five SBG peptides via one Peptide class and the batched torch force
 field, plus a validated in-house MD generator), Tier 4 (both Kob-Andersen systems: the swap-friendly
 ternary and the binary of Cheng et al. 2026), the metrics package, the classical baselines, parallel
-tempering, 509 tests.
+tempering, 570 tests.
 
 Not yet built: the learned-SDE baseline class (PIS/DDS/DIS/CMCD) and SMC/AIS; the
 adjoint-sampling / GEOM drug-like molecules; phi^4 and the rest of Tier 4.
@@ -63,7 +63,7 @@ modules (ABI mismatch):
 
 ```sh
 ./venv/bin/pip install -e ".[dev,molecular]"
-./venv/bin/python -m pytest tests -q  # 509 tests, ~2 min with the reference sets cached
+./venv/bin/python -m pytest tests -q  # 570 tests, ~2 min with the reference sets cached
 ./venv/bin/python examples/quickstart.py
 ```
 
@@ -87,7 +87,8 @@ samplingdb/
   targets/
     base.py          Target, ExactTarget, spec_id, score_autograd (test-only)
     modes.py         ModeCoverage: the mode-weight panel every mode-descriptor target reports
-    catalog.py       CATALOG, build, catalog -- the one list of what this library ships
+    catalog.py       CATALOG, build, catalog, download_references -- the one list of what this
+                     library ships
     mixtures.py      Mixture, MOG, GMM40, MoS, TwoModes, BracketTwoModes, ManyModes,
                      EightGaussians
     toys.py          Rings, Checkerboard
@@ -104,7 +105,9 @@ samplingdb/
     nrpt.py          non_reversible_parallel_tempering, its references, explorers and step-size
                      calibration -- the sampler behind every generated reference set
     tempering.py     parallel_tempering, geometric_ladder -- HMC rungs, even/odd swaps
-  data.py            cache dir, checksums, fetch_url / fetch_hf / fetch_zenodo, cached_local
+  data.py            cache dir, checksums, fetch_url / fetch_hf / fetch_zenodo, cached_local, and
+                     the published reference sets: REFERENCE_REPO, REFERENCE_REVISION,
+                     REFERENCE_CHECKSUMS, fetch_reference
 gen/                 maintainer-only, NOT part of the package's import graph
   assets/            the jax script behind the pinned mean matrices
   stan/              four .stan files and generate.py, the Tier 2 reference posteriors
@@ -113,6 +116,8 @@ gen/                 maintainer-only, NOT part of the package's import graph
   md/                generate.py, replica-exchange MD with solute tempering for the peptides
   merge_shards.py    concatenates the shards of one run and re-audits the merged set
   audit/             barrier.py, decorrelation.py, stationarity.py -- what a set is worth
+  publish/           publish.py and the dataset card: checks the sets against the code, uploads
+                     them to the Hugging Face dataset and tags the release
   openmm_check/      the retired OpenMMBridge, and compare.py which checks and times against it
 tests/
 examples/
@@ -191,7 +196,10 @@ where a missing piece gets caught, and it is how the DW-2 `KeyError` was found.
    density-defining values and `train_cache_key` hashes them, so **a new constructor argument that
    moves `log_gamma` must appear in that target's `spec()`** — otherwise two densities share one
    cache entry and the second silently reads the first's split. `VARIANTS` in
-   `tests/test_catalog.py` is where each such knob is pinned.
+   `tests/test_catalog.py` is where each such knob is pinned. Reference sets are keyed the same way,
+   `reference_key()` = `<name>_<spec_id>`, in the cache and in the published dataset, so the
+   working dtype must not move `spec_id`: a float64 build has to read the set the float32 default
+   reads.
 10. **Never weaken a test in `tests/test_target_specs.py` to make code pass.** Those assertions come
    from independent reimplementations and were verified by execution. If one fails the
    implementation is wrong, unless the tolerance genuinely reflects a rounding in the *published*
@@ -223,7 +231,10 @@ where a missing piece gets caught, and it is how the DW-2 `KeyError` was found.
     sha256 in a manifest next to it, and must pass gates BEFORE it is written: R-hat/ESS/divergences
     for Stan, ten ladder round trips per chain and a 5% floor on every swap pair for parallel
     tempering. Second, a generated reference has to beat the published one on the published one's own
-    self-comparison floor before it replaces it.
+    self-comparison floor before it replaces it. Third, our own sets are published to the Hugging
+    Face dataset `REFERENCE_REPO` only once they pass their audit, by `gen/publish/publish.py`; a
+    published file is never replaced, and a release is a new tag with new lines in
+    `REFERENCE_CHECKSUMS`.
 16. **Reproducing somebody's panel means running theirs and diffing the numbers.** The molecular
     panel is `transferable-samplers`' six scalars rewritten as batched torch, and it was accepted
     only after importing their originals and comparing: `energy_w1`/`energy_w2` and `tica_w2` agree
