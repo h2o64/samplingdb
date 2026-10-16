@@ -63,8 +63,14 @@ value can be overridden on the command line.
 | `ka-binary-N64-T0.2` | 20 | 0.1 | 2 | 100 |
 
 LJ-55 starts at `beta_min = 0.5` because its target temperature `T* = 0.5` is already above the
-cluster's melting point (0.294): hotter levels would spend most of the barrier on a dilute gas. The binary glass at T = 0.2 is the slowest set: its crystallite only melts
-at the hot levels.
+cluster's melting point (0.294): hotter levels would spend most of the barrier on a dilute gas.
+
+The binary glass at T = 0.2 is the slowest set, and no set made this way has yet passed a
+stationarity check. The hottest levels melt it: plain HMC forgets the B arrangement in ~300 moves
+at T = 2.0. But replicas that crystallise get trapped between T = 0.4 and 0.9, about one standard
+deviation lower in energy than the other replicas at their level, and from there they hold the
+T = 0.2 level a third of the time. From melted starts, the mean energy of 6 400 chains was still
+falling after 460 000 scans.
 
 Before anything is written, every (level, chain) pair must accept more than 1% of its local moves,
 every chain must make `--min_round_trips` (10) round trips, every pair of adjacent levels must
