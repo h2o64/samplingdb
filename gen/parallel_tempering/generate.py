@@ -8,6 +8,7 @@ from samplingdb import DW4, KobAndersenBinary, LJ13, LJ55
 from samplingdb.baselines import (hmc_explorer, linear_schedule,
                                   non_reversible_parallel_tempering)
 from samplingdb.data import cache_dir, manifest, sha256
+from samplingdb.targets import spec_id
 from samplingdb.metrics import chain_mean_dispersion, effective_sample_size
 
 # Per-target ladder and budget. beta_min is chosen so the hot rung is a liquid or a gas: the
@@ -221,7 +222,8 @@ def write(samples, diagnostics, extra):
     """
     folder = cache_dir() / 'pt'
     folder.mkdir(parents=True, exist_ok=True)
-    stem = target.name if args.shard is None else '%s_shard%02d' % (target.name, args.shard)
+    stem = (target.reference_key() if args.shard is None
+            else '%s_shard%02d' % (target.name, args.shard))
     path = folder / (stem + '.npy')
     np.save(path, samples.reshape(-1, target.dim).cpu().numpy())
     protocol = dict(config)
@@ -235,7 +237,7 @@ def write(samples, diagnostics, extra):
     })
     protocol.update(extra)
     (folder / (stem + '_manifest.json')).write_text(manifest(
-        target.name, protocol, {path.name: sha256(path)}))
+        target.name, spec_id(target.spec()), protocol, {path.name: sha256(path)}))
     return path
 
 

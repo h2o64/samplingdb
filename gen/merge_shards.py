@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from samplingdb import Peptide, build
 from samplingdb.data import cache_dir, manifest, sha256
+from samplingdb.targets import spec_id
 from samplingdb.metrics import chain_mean_dispersion, effective_sample_size
 
 # Where each generator writes, and the manifest key naming how many chains it interleaved
@@ -183,7 +184,7 @@ assert len(flat) >= args.min_samples, (
     % (len(flat), args.min_samples))
 
 # One file and one manifest, with every shard's protocol kept so the run is reproducible
-path = folder / (target.name + '.npy')
+path = folder / (target.reference_key() + '.npy')
 np.save(path, flat)
 protocol = {'sampler': protocols[0]['sampler'], 'n_shards': len(paths), 'shards': protocols,
             'n_samples': len(flat), 'n_keep': n_keep, FOLDERS[args.folder]: n_chains,
@@ -196,8 +197,8 @@ if ess is not None:
                      'start_drift': drifts[drift_name]})
 if fold_pairs is not None:
     protocol['compact_by_start'] = [float(from_folded.mean()), float(from_extended.mean())]
-(folder / (target.name + '_manifest.json')).write_text(manifest(
-    target.name, protocol, {path.name: sha256(path)}))
+(folder / (target.reference_key() + '_manifest.json')).write_text(manifest(
+    target.name, spec_id(target.spec()), protocol, {path.name: sha256(path)}))
 print('wrote %s  %s' % (path, flat.shape))
 
 if not args.keep_shards:

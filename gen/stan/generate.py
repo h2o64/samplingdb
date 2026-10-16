@@ -7,6 +7,7 @@ import torch
 from cmdstanpy import CmdStanModel
 from samplingdb import build as build_target
 from samplingdb.data import cache_dir, manifest, sha256
+from samplingdb.targets import spec_id
 from samplingdb.targets.bayesian import Brownian, LogisticRegression, Seeds
 
 # Per-target sampler settings. The logistic posteriors are log-concave and need nothing special;
@@ -231,7 +232,7 @@ def main():
     assert samples.shape[1] == target.dim
     folder = cache_dir() / 'stan'
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / (target.name + '.npy')
+    path = folder / (target.reference_key() + '.npy')
     np.save(path, samples)
 
     # A manifest, so the run behind a reference set is recoverable
@@ -240,8 +241,9 @@ def main():
                      'max_rhat': rhat, 'min_ess_bulk': ess, 'efficiency': efficiency,
                      'divergences': divergences,
                      'wall_clock_seconds': round(elapsed, 1), 'n_draws': len(samples)})
-    with open(folder / (target.name + '_manifest.json'), 'w') as handle:
-        handle.write(manifest(target.name, protocol, {path.name: sha256(path)}))
+    with open(folder / (target.reference_key() + '_manifest.json'), 'w') as handle:
+        handle.write(manifest(target.name, spec_id(target.spec()), protocol,
+                              {path.name: sha256(path)}))
     print('wrote', path, json.dumps(protocol))
 
     # A first look at the posterior it produced

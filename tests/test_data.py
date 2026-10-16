@@ -71,10 +71,11 @@ def test_every_fetch_helper_honours_the_override(monkeypatch, tmp_path):
 
 
 def test_manifest_records_the_protocol():
-    """Every generated reference set travels with its name, protocol and checksums"""
-    payload = data.manifest('dw4', {'sampler': 'metropolis', 'step_size': 0.5},
+    """Every generated reference set travels with its name, spec_id, protocol and checksums"""
+    payload = data.manifest('dw4', '6b739c6d', {'sampler': 'metropolis', 'step_size': 0.5},
                             {'test.npy': 'abc'})
     assert '"target": "dw4"' in payload
+    assert '"spec_id": "6b739c6d"' in payload
     assert '"step_size": 0.5' in payload
 
 

@@ -5,6 +5,7 @@ import argparse, pprint, time
 import numpy as np
 import torch
 from samplingdb.data import cache_dir, manifest, sha256
+from samplingdb.targets import spec_id
 from samplingdb.targets.physics import KobAndersen2D, swap_monte_carlo
 
 # Parse the arguments
@@ -57,7 +58,7 @@ if args.merge:
     shards = sorted(folder.glob(target.name + '_shard*.npy'))
     assert shards, 'no shards to merge in ' + str(folder)
     array = np.concatenate([np.load(path) for path in shards])
-    path = folder / (target.name + '.npy')
+    path = folder / (target.reference_key() + '.npy')
 
     # The specific heat is the acceptance criterion, following Jung et al 2024: it needs
     # independent configurations rather than merely equilibrated ones, so it plateaus far later
@@ -81,8 +82,8 @@ if args.merge:
                      'shards': [p.name for p in shards], 'tau_alpha': tau,
                      'specific_heat': cv, 'specific_heat_halves': halves,
                      'torch': torch.__version__})
-    (folder / (target.name + '_manifest.json')).write_text(manifest(
-        target.name, protocol, {path.name: sha256(path)}))
+    (folder / (target.reference_key() + '_manifest.json')).write_text(manifest(
+        target.name, spec_id(target.spec()), protocol, {path.name: sha256(path)}))
     print('merged %d shards into %s  %s' % (len(shards), path, array.shape))
     raise SystemExit
 

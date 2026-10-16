@@ -8,6 +8,7 @@ from samplingdb import Peptide
 from samplingdb.baselines import (PotentialReference, dynamics_explorer, linear_schedule,
                                   non_reversible_parallel_tempering)
 from samplingdb.data import cache_dir, manifest, sha256
+from samplingdb.targets import spec_id
 from samplingdb.metrics import chain_mean_dispersion, effective_sample_size
 from samplingdb.targets.molecular import PEPTIDE_SYSTEMS
 
@@ -403,7 +404,7 @@ if args.calibrate:
 # Save, interleaved by scan so reading the first n spans every replica
 folder = cache_dir() / 'md'
 folder.mkdir(parents=True, exist_ok=True)
-stem = target.name if args.shard is None else '%s_shard%02d' % (target.name, args.shard)
+stem = target.reference_key() if args.shard is None else '%s_shard%02d' % (target.name, args.shard)
 path = folder / (stem + '.npy')
 array = samples.reshape(-1, target.dim).cpu().numpy()
 np.save(path, array)
@@ -435,5 +436,5 @@ if fold is not None:
                      'started_folded': started_folded.tolist(),
                      'compact_by_start': compact_by_start})
 (folder / (stem + '_manifest.json')).write_text(manifest(
-    target.name, protocol, {path.name: sha256(path)}))
+    target.name, spec_id(target.spec()), protocol, {path.name: sha256(path)}))
 print('wrote %s  %s in %.0f s' % (path, array.shape, elapsed))

@@ -80,10 +80,11 @@ config = vars(args)
 pprint.pprint(config)
 
 # Read the reference set and the chain count the generator interleaved it by. The catalog name is
-# not the file name -- every generator writes target.name, so the target has to be built first
+# not the file name -- every generator writes target.reference_key(), so the target has to be built
+# first
 target = build(args.target).to(torch.device(args.device))
 folder = cache_dir() / args.folder
-array = np.load(folder / (target.name + '.npy'))
+array = np.load(folder / (target.reference_key() + '.npy'))
 n_chains = args.n_chains
 if n_chains is None:
     # Stan's draws are randomly PERMUTED before saving, so they have no chain axis left and an
@@ -92,7 +93,7 @@ if n_chains is None:
     assert FOLDERS[args.folder] is not None, (
         'the ' + args.folder + ' sets are permuted before saving, so there is no ordering to '
         'measure. Read min_ess_bulk out of the manifest instead, or pass --n_chains to override.')
-    manifest = json.loads((folder / (target.name + '_manifest.json')).read_text())
+    manifest = json.loads((folder / (target.reference_key() + '_manifest.json')).read_text())
     n_chains = manifest['protocol'][FOLDERS[args.folder]]
     thin = manifest['protocol'].get('thin', 1)
     print('manifest: %d chains, thin %s' % (n_chains, thin))
