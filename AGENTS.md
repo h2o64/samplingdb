@@ -44,7 +44,7 @@ references, Tier 2 (the seven Bayesian posteriors on Stan draws, each with the m
 literature reports), Tier 3 (the five SBG peptides via one Peptide class and the batched torch force
 field, plus a validated in-house MD generator), Tier 4 (both Kob-Andersen systems: the swap-friendly
 ternary and the binary of Cheng et al. 2026), the metrics package, the classical baselines, parallel
-tempering, 508 tests.
+tempering, 509 tests.
 
 Not yet built: the learned-SDE baseline class (PIS/DDS/DIS/CMCD) and SMC/AIS; the
 adjoint-sampling / GEOM drug-like molecules; phi^4 and the rest of Tier 4.
@@ -63,7 +63,7 @@ modules (ABI mismatch):
 
 ```sh
 ./venv/bin/pip install -e ".[dev,molecular]"
-./venv/bin/python -m pytest tests -q  # 508 tests, ~2 min with the reference sets cached
+./venv/bin/python -m pytest tests -q  # 509 tests, ~2 min with the reference sets cached
 ./venv/bin/python examples/quickstart.py
 ```
 
