@@ -84,7 +84,7 @@ SETTINGS = {
              'n_local': 8, 'thin': 8},
     'ka-binary-N64-T0.2': {'target': lambda: KobAndersenBinary(temperature=0.2, n_particles=64),
                            'n_rungs': 20, 'beta_min': 0.1, 'step_size': 0.005,
-                           'n_local': 2, 'thin': 100},
+                           'n_local': 2, 'thin': 100, 'melt_beta': 0.2, 'melt_scans': 2000},
     'ka-binary-N64-T0.5': {'target': lambda: KobAndersenBinary(temperature=0.5, n_particles=64),
                            'n_rungs': 12, 'beta_min': 0.2, 'step_size': 0.01,
                            'n_local': 2, 'thin': 110},
@@ -109,6 +109,9 @@ parser.add_argument('--calibrate', action='store_true')
 parser.add_argument('--freeze', action='store_true')
 parser.add_argument('--n_scans', type=int, default=None)
 parser.add_argument('--n_burn', type=int, default=None)
+parser.add_argument('--hours', type=float, default=None)
+parser.add_argument('--melt_beta', type=float, default=None)
+parser.add_argument('--melt_scans', type=int, default=None)
 parser.add_argument('--shard', type=int, default=None)
 parser.add_argument('--n_shards', type=int, default=1)
 parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
@@ -131,9 +134,9 @@ pprint.pprint(config)
 # re-places the rungs between rounds from the communication barrier it measures, so beta_min is
 # the one thing left to choose and n_rungs no longer has to be guessed well
 settings = SETTINGS[args.target]
-for key in ['thin', 'n_local', 'n_rungs', 'beta_min', 'step_size']:
+for key in ['thin', 'n_local', 'n_rungs', 'beta_min', 'step_size', 'melt_beta', 'melt_scans']:
     if getattr(args, key) is None:
-        setattr(args, key, settings[key])
+        setattr(args, key, settings.get(key))
 config = vars(args)
 device = torch.device(args.device)
 target = settings['target']().to(device)
@@ -187,20 +190,92 @@ if args.freeze:
     print('frozen from the calibration: %d rungs, beta %.4f .. %.4f, %d scans after %d burn-in'
           % (len(schedule), schedule[0], schedule[-1], args.n_scans or 0, args.n_burn or 0))
 
+# Melt the start at a level where the particles mix, then hand the melt to every rung. The lattice
+# puts the binary glass's 13 B particles on consecutive sites: from there its cold rung still had
+# 0.53 B-B contacts per configuration after 30 000 scans, against 0.17 at equilibrium, while at
+# T = 1.0 the contacts decorrelate in ~70 scans
 start_time = time.time()
+explorer = hmc_explorer(n_steps=args.n_local, n_leapfrog=args.n_leapfrog)
+if args.melt_scans:
+    level = int(torch.argmin((schedule - args.melt_beta).abs()))
+    melt_beta = schedule[level]
+    melt_step = step_size[level] if torch.is_tensor(step_size) else step_size
+    melted = x0[0]
+    for _ in range(args.melt_scans):
+        melted, _ = explorer(lambda z: melt_beta * target.log_prob(z),
+                             lambda z: melt_beta * target.score(z), melted, melt_step, None)
+    x0 = melted[None].expand(len(schedule), args.n_chains, target.dim).contiguous()
+    print('melted the start for %d scans at beta %.4f' % (args.melt_scans, float(melt_beta)))
+
+
+def write(samples, diagnostics, extra):
+    """Saves the stored states chain-interleaved, next to a manifest naming the protocol
+
+    Args:
+        * samples (torch.Tensor of shape (n_keep, n_chains, dim)): States of the beta = 1 rung
+        * diagnostics (dict): What non_reversible_parallel_tempering returned last
+        * extra (dict): Diagnostics to record beside the protocol
+
+    Returns:
+        * path (pathlib.Path): Where the states went
+    """
+    folder = cache_dir() / 'pt'
+    folder.mkdir(parents=True, exist_ok=True)
+    stem = target.name if args.shard is None else '%s_shard%02d' % (target.name, args.shard)
+    path = folder / (stem + '.npy')
+    np.save(path, samples.reshape(-1, target.dim).cpu().numpy())
+    protocol = dict(config)
+    protocol.update({
+        'n_keep': len(samples),
+        'sampler': 'non_reversible_parallel_tempering', 'n_rungs': args.n_rungs,
+        'beta_min': settings['beta_min'], 'initial_step_size': settings['step_size'],
+        'final_beta': [float(v) for v in diagnostics['beta']],
+        'final_step_size': [float(v) for v in diagnostics['step_size']],
+        'torch': torch.__version__,
+    })
+    protocol.update(extra)
+    (folder / (stem + '_manifest.json')).write_text(manifest(
+        target.name, protocol, {path.name: sha256(path)}))
+    return path
+
+
 samples, diagnostics = non_reversible_parallel_tempering(
-    target.log_prob, target.score, x0, schedule,
-    explorer=hmc_explorer(n_steps=args.n_local, n_leapfrog=args.n_leapfrog),
+    target.log_prob, target.score, x0, schedule, explorer=explorer,
     n_rounds=n_rounds, reference=None, step_size=step_size,
     adaptation_gain=0.0 if args.freeze else 1.0, generator=None,
     thin=args.thin, n_scans=args.n_scans, n_burn=args.n_burn or 0, return_diagnostics=True,
 )
+
+# --hours makes n_scans one SEGMENT of a run that lasts as long as the wall clock allows. Each
+# segment continues from the last one's rung-ordered state, so the segments are one chain, and the
+# shard is rewritten after every one: a job then costs its hours whatever GPU it lands on, and a
+# job stopped early keeps every segment it finished
+n_segments, round_trips = 1, diagnostics['round_trips']
+if args.hours is not None:
+    assert args.freeze, '--hours continues a frozen ladder, so it needs --freeze'
+    assert float(diagnostics['explorer_acceptance_per_chain'].min()) > 0.01, (
+        'a chain is frozen after the burn-in, so nothing was written')
+    write(samples, diagnostics, {'n_segments': n_segments})
+    segment = (time.time() - start_time) * args.n_scans / (args.n_scans + (args.n_burn or 0))
+    while time.time() - start_time + 1.5 * segment < 3600 * args.hours:
+        begun = time.time()
+        more, diagnostics = non_reversible_parallel_tempering(
+            target.log_prob, target.score, diagnostics['rung_state'], schedule, explorer=explorer,
+            n_rounds=1, reference=None, step_size=step_size, adaptation_gain=0.0, generator=None,
+            thin=args.thin, n_scans=args.n_scans, return_diagnostics=True)
+        samples = torch.cat([samples, more])
+        round_trips = round_trips + diagnostics['round_trips']
+        n_segments += 1
+        segment = time.time() - begun
+        write(samples, diagnostics, {'n_segments': n_segments})
+        print('segment %d: %d stored per chain, %.0f s' % (n_segments, len(samples),
+                                                          time.time() - start_time), flush=True)
 elapsed = time.time() - start_time
 
 # Report the diagnostics the run has to clear before its output is worth anything. The scans run
 # are the discarded doubling rounds, the final round and its burn-in, which a frozen run reduces to
 # the last two
-n_scans = args.n_scans or 2 ** n_rounds
+n_scans = (args.n_scans or 2 ** n_rounds) * n_segments
 total_scans = 2 ** n_rounds - 2 + n_scans + (args.n_burn or 0)
 print('\n%.1f s for %d scans over %d rounds, collecting %d of the last %d'
       % (elapsed, total_scans, n_rounds, n_scans // args.thin, n_scans))
@@ -210,7 +285,6 @@ print('beta            ', [round(float(v), 4) for v in diagnostics['beta']])
 print('rejection       ', [round(float(v), 3) for v in diagnostics['rejection']])
 print('explorer accept ', [round(float(v), 3) for v in diagnostics['explorer_acceptance']])
 print('step size       ', [round(float(v), 5) for v in diagnostics['step_size']])
-round_trips = diagnostics['round_trips']
 print('round trips per chain (final round): mean %.1f  min %.0f  max %.0f'
       % (float(round_trips.mean()), float(round_trips.min()), float(round_trips.max())))
 
@@ -314,11 +388,9 @@ if ess['efficiency'] < 0.9:
     print('NOTE: thin %d leaves %.0f%% efficiency; about %d should reach 90%%, iterate from there'
           % (args.thin, 100 * ess['efficiency'], int(args.thin * ess['tau'] / 0.9) + 1))
 
-# Flatten chain-interleaved, so reading the first n samples spans every chain
-samples = samples.reshape(-1, target.dim).cpu().numpy()
 # Report the ENERGY, not -log_prob: they differ by the temperature wherever one is folded in
-print('\ncollected %s from the beta = 1 rung' % (samples.shape,))
-head = torch.as_tensor(samples[:1000]).to(device)
+print('\ncollected %s from the beta = 1 rung' % (tuple(samples.reshape(-1, target.dim).shape),))
+head = samples.reshape(-1, target.dim)[:1000]
 energy = target.energy(head) if hasattr(target, 'energy') else -target.log_prob(head)
 per_particle = getattr(target, 'n_particles', getattr(target, 'n_atoms', 1))
 print('energy: mean %.4f  std %.4f  (per particle %.4f)' % (
@@ -353,18 +425,8 @@ if args.calibrate:
     raise SystemExit(0)
 
 # Save the draws next to a manifest naming the protocol
-folder = cache_dir() / 'pt'
-folder.mkdir(parents=True, exist_ok=True)
-stem = target.name if args.shard is None else '%s_shard%02d' % (target.name, args.shard)
-path = folder / (stem + '.npy')
-np.save(path, samples)
-protocol = dict(config)
-protocol.update({
-    'n_keep': n_keep,
-    'sampler': 'non_reversible_parallel_tempering', 'n_rungs': args.n_rungs,
-    'beta_min': settings['beta_min'], 'initial_step_size': settings['step_size'],
-    'final_beta': [float(v) for v in diagnostics['beta']],
-    'final_step_size': [float(v) for v in diagnostics['step_size']],
+path = write(samples, diagnostics, {
+    'n_segments': n_segments,
     'explorer_acceptance': [float(v) for v in diagnostics['explorer_acceptance']],
     'rejection': [float(v) for v in diagnostics['rejection']],
     'barrier': diagnostics['barrier'],
@@ -377,8 +439,5 @@ protocol.update({
     'n_effective': ess['n_effective'],
     'efficiency': ess['efficiency'],
     'wall_clock_seconds': round(elapsed, 1),
-    'torch': torch.__version__,
 })
-(folder / (stem + '_manifest.json')).write_text(manifest(
-    target.name, protocol, {path.name: sha256(path)}))
 print('wrote %s' % path)

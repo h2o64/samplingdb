@@ -25,6 +25,7 @@ Both run the target's energy and score through `torch.compile`.
 | `--freeze` | reuses that plan's schedule and step sizes and adapts nothing |
 | `--n_scans N`, `--n_burn M` | the length of the collection round and the burn-in in front of it |
 | `--shard K --n_shards N` | writes `<name>_shardKK.npy` under seed `seed + K`, an independent run |
+| `--hours H` | parallel tempering with `--freeze` only: repeats `--n_scans` segments, each continuing from the last one's rung-ordered state, until H hours are spent, and rewrites the shard after every segment |
 
 ```sh
 python gen/parallel_tempering/generate.py --target lj55 --calibrate
