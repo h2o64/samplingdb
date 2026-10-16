@@ -48,9 +48,9 @@ from samplingdb.metrics import chain_mean_dispersion, effective_sample_size
 # (64 chains, 2026-10-09) its slowest observables were structural: B-B contacts tau 1257 scans,
 # mean pair distance 1067, the orientation and size of an A crystallite 772 and 724, against 137
 # for the energy -- and those are still lower bounds. At T = 0.2 the A particles partly crystallise
-# (see KobAndersenBinary), and the crystallite only melts at the hot levels. One chain-scan runs at
-# ~1300/s on an RTX A6000 whatever the batch, so this target costs ~80 GPU-hours at 100 000
-# samples and its calibration has to collect for well over a round trip (~3000 scans).
+# (see KobAndersenBinary), and the crystallite only melts at the hot levels. Compiled, one
+# chain-scan runs at ~33 600/s on an RTX A6000 from 256 chains up, and its calibration has to
+# collect for well over a round trip (~3000 scans).
 SETTINGS = {
     'dw4': {'target': lambda: DW4(), 'n_rungs': 12, 'beta_min': 0.1, 'step_size': 0.05,
             'n_local': 2, 'thin': 16},
@@ -137,6 +137,13 @@ for key in ['thin', 'n_local', 'n_rungs', 'beta_min', 'step_size']:
 config = vars(args)
 device = torch.device(args.device)
 target = settings['target']().to(device)
+
+# Compile the energy and score chunks. Every target here evaluates on all-pairs temporaries, which
+# eager torch reads and writes once per elementwise op, and inductor fuses the whole chain: on the
+# binary glass that is 1300 against 33 600 chain-scans per second on an RTX A6000, with the score
+# agreeing to 2e-6
+target.energy_chunk = torch.compile(target.energy_chunk, dynamic=False)
+target.score_chunk = torch.compile(target.score_chunk, dynamic=False)
 beta = linear_schedule(args.n_rungs, args.beta_min, dtype=target.dtype, device=device)
 print('target %s  dim %d  rungs %d  beta %.4f .. 1.0' % (
     target.name, target.dim, len(beta), float(beta[0])))

@@ -16,7 +16,8 @@ seed, and every set is stored interleaved so that its first `n` rows span every 
 
 ## Sharded runs
 
-The two tempered generators share four modes, and `gen/merge_shards.py` combines their output:
+The two tempered generators share these modes, and `gen/merge_shards.py` combines their output.
+Both run the target's energy and score through `torch.compile`.
 
 | Flag | Effect |
 | --- | --- |
@@ -98,7 +99,7 @@ every replica must complete a round trip, more than half of the stored states mu
 independent (on the pair distances, their quantiles and the first four torsions), and the energy
 must not move by 5 or more standard errors between the two halves of the collection round. On
 chignolin, the ladders started folded and those started extended must also end with compact
-fractions within 4 standard errors of each other. `--compile` is worth turning on for any long run.
+fractions within 4 standard errors of each other.
 
 ## Swap Monte Carlo: the ternary glass
 

@@ -325,7 +325,6 @@ class OpenMMTarget(Target):
             raise FileNotFoundError(
                 'no generated ensemble for ' + self.name + ' at ' + str(path) + '. Generate one '
                 'with: ./venv/bin/python gen/md/generate.py --sequence ' + self.sequence
-                + ' --compile'
             )
         array = np.load(path, mmap_mode='r')
         if n is not None:
@@ -949,11 +948,11 @@ class Peptide(OpenMMTarget):
             raise FileNotFoundError(
                 'no reference ensemble for ' + self.name + ' at ' + str(path) + '. Generate one '
                 'with: ./venv/bin/python gen/md/generate.py --sequence ' + self.sequence
-                + ' --compile.  load_split("' + self.reference_split + '") reads the released '
+                + '.  load_split("' + self.reference_split + '") reads the released '
                 'split instead, which is what the literature reports against.'
             )
         array = read_rows(path, n, './venv/bin/python gen/md/generate.py --sequence '
-                          + self.sequence + ' --compile --shard <k> --n_shards <m> for every '
+                          + self.sequence + ' --shard <k> --n_shards <m> for every '
                           'k < m, then ./venv/bin/python gen/merge_shards.py --folder md '
                           '--target ' + self.sequence + ' --min_samples <n>')
         return torch.as_tensor(array, dtype=self.dtype, device=self.device)

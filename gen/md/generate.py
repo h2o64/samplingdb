@@ -128,7 +128,6 @@ parser.add_argument('--n_scans', type=int, default=None)
 parser.add_argument('--n_burn', type=int, default=None)
 parser.add_argument('--shard', type=int, default=None)
 parser.add_argument('--n_shards', type=int, default=1)
-parser.add_argument('--compile', action='store_true')
 parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
 parser.add_argument('--seed', type=int, default=0)
 args = parser.parse_args()
@@ -154,7 +153,7 @@ pprint.pprint(config)
 
 # Build the target
 device = torch.device(args.device)
-target = Peptide(sequence=args.sequence, compile=args.compile).to(device)
+target = Peptide(sequence=args.sequence).to(device)
 print('%s: %d atoms, %d rungs, %d replicas, %d fs per scan'
       % (target.name, target.n_atoms, args.n_rungs, args.n_replicas, args.md_steps))
 
