@@ -1,7 +1,7 @@
 # Invariants every target in the catalog must satisfy, whatever tier it belongs to
 
 # Libraries
-import re
+import inspect, re
 import numpy as np
 import pytest
 import torch
@@ -201,6 +201,21 @@ def test_no_two_targets_share_a_name_or_a_train_cache_key():
         assert key not in cache_keys, key + ' is shared by ' + cache_keys.get(key, '?')
         cache_keys[key] = name
     assert len(names) >= 13
+
+
+@pytest.mark.parametrize('name', catalogued())
+def test_the_working_dtype_does_not_change_the_reference_set(name):
+    """A target built in float64 reads the same reference set as the float32 default
+
+    The dtype is how the density is evaluated, not which density it is, so it must not move
+    spec_id. The glass targets once hashed their pair constants at the working precision, and a
+    float64 build looked for a reference set nobody had generated.
+    """
+    if 'dtype' not in inspect.signature(CATALOG[name]['cls'].__init__).parameters:
+        return
+    built = target(name, **uncompiled(name))
+    other = target(name, dtype=torch.float64, **uncompiled(name))
+    assert spec_id(built.spec()) == spec_id(other.spec())
 
 
 # Two settings of one class that are two different densities under one name. Every entry differs

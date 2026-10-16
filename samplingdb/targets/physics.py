@@ -483,11 +483,15 @@ class PeriodicPairMixture(Target):
         return x
 
     def spec(self):
-        """Adds the pair parameters, the composition, the density and the cutoff"""
+        """Adds the pair parameters, the composition, the density and the cutoff
+
+        The pair parameters enter at float32, the default working dtype, so a target built in
+        float64 keeps the spec_id of the default one and reads the same reference set.
+        """
         spec = super().spec()
-        spec.update({'sigma': self.sigma, 'epsilon': self.epsilon, 'species': self.species,
-                     'density': self.density, 'cutoff_factor': self.cutoff_factor,
-                     'temperature': self.temperature})
+        spec.update({'sigma': self.sigma.float(), 'epsilon': self.epsilon.float(),
+                     'species': self.species, 'density': self.density,
+                     'cutoff_factor': self.cutoff_factor, 'temperature': self.temperature})
         return spec
 
     def train_cache_key(self, n):
