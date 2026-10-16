@@ -35,10 +35,15 @@ python gen/merge_shards.py --target lj55 --folder pt
 ```
 
 Independent chains are independent, so shards merge exactly. `merge_shards.py` concatenates them
-along the chain axis, re-audits the whole set, and refuses to write it if it holds fewer than
-`--min_samples` (100 000), if fewer than 90% of its stored states are effectively independent, or
-if any observable's first tenth sits 5 or more standard errors from its last half. It deletes the
-shard files afterwards unless `--keep_shards` is given.
+along the chain axis and re-audits the whole set. It keeps every k-th stored state, for the
+smallest k at which the merged set is worth more than 90% of its length by both the
+autocorrelation and the spread of the chain means, and no observable's first tenth sits 5 or more
+standard errors from its last half. When no k leaves two states per chain, it keeps the last state
+of every chain. It refuses to write a set smaller than `--min_samples` (100 000), and it deletes
+the shard files afterwards unless `--keep_shards` is given.
+
+The drift check loses power as the states per chain fall: at three per chain it compares one state
+against two. Read the means by stored index across every chain before trusting a sparse merge.
 
 A frozen run needs a starting state near equilibrium, because a frozen step size on a high-energy
 start is rejected forever. The generators start from their own lattices and minimised structures,
