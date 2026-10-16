@@ -152,12 +152,12 @@ constant included, at eight random points, and stops if they differ by more than
 | logistic regressions | 0.8 | 10 | 4 | 1 |
 | `seeds` | 0.95 | 12 | 4 | 32 |
 | `brownian` | 0.95 | 12 | 4 | 48 |
-| `lgcp-whitened` | 0.8 | 10 | 16 | 3 |
+| `lgcp`, `lgcp-whitened` | 0.8 | 10 | 16 | 3 |
 
 Nothing is written unless the largest R-hat is below 1.01, the smallest bulk ESS is above 90% of
 the kept draws, and there are no divergent transitions. The draws are shuffled with a seeded
-permutation, so the first `n` rows span every chain. The direct LGCP parameterisation has no
-reference set; see [Bayesian posteriors](targets/posteriors.md).
+permutation, so the first `n` rows span every chain. The direct LGCP parameterisation is the slow
+one: its run took 29 hours on one machine, against 30 minutes for the whitened one.
 
 ## Audits
 

@@ -40,8 +40,9 @@ funnel of the tier, and the middle ten steps are constrained only by the random 
 `K = sigma^2 exp(-|m - n| / (40 beta))`, `sigma^2 = 1.91`, `beta = 1/33`,
 `mu = log(126) - sigma^2 / 2` and `a = 1/1600`. `LGCP()` samples `x` directly, the setting of
 Blessing et al. 2024. `LGCP(whitened=True)` samples `e` with `x = L e + mu`; it is a different
-geometry with its own name, and the only one with a reference set, because the direct one needs a
-dense 1600 x 1600 triangular solve per gradient and is too slow for Stan.
+geometry with its own name. Both have a Stan reference set, but the direct one needs a dense
+1600 x 1600 triangular solve per gradient: its run took 29 hours, against 30 minutes for the
+whitened one.
 
 ## Metric panel
 
