@@ -3,7 +3,7 @@
 # Libraries
 import hashlib
 import torch
-from ..data import cached_local
+from ..data import cache_dir, cached_local
 from ..metrics.weights import normalize_weights
 from ..metrics.standard import compute_standard_metrics as standard_metrics
 
@@ -36,6 +36,8 @@ class Target(torch.nn.Module):
     * default_n (int): Size of either split when n is not given
     * standard_panel (bool): Whether the target-agnostic coordinate-space panel means anything
         here; see compute_metrics
+    * reference_folder (str or None): Cache sub-directory of the generator that writes the
+        reference set, None for a target that has no generated one
     """
 
     dist = None
@@ -44,6 +46,7 @@ class Target(torch.nn.Module):
     n_modes = None
     default_n = DEFAULT_N
     standard_panel = False
+    reference_folder = None
 
     # Scale a Gaussian reference distribution should use for this target, for a sampler that
     # anneals towards it. Not used by the density itself
@@ -196,6 +199,18 @@ class Target(torch.nn.Module):
         so two settings cannot collide on one cache entry.
         """
         return 'train_' + self.name + '_' + spec_id(self.spec()) + '_n' + str(n)
+
+    def reference_key(self):
+        """Returns the file stem of the generated reference set, its name and spec_id
+
+        A reference set is versioned the way a train split is: the stem carries spec_id, so a
+        density change is a cache miss and a new published file rather than the old set read back.
+        """
+        return self.name + '_' + spec_id(self.spec())
+
+    def reference_path(self):
+        """Returns the cache path of the generated reference set, whether or not it is there"""
+        return cache_dir() / self.reference_folder / (self.reference_key() + '.npy')
 
     def generate_train_samples(self, n):
         """Runs this target's documented locally-correct-globally-short recipe"""

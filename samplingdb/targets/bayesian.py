@@ -5,7 +5,7 @@ import math
 import pickle
 import numpy as np
 import torch
-from ..data import cache_dir, fetch_url, read_rows
+from ..data import fetch_reference, fetch_url, read_rows
 from ..metrics.weights import normalize_weights
 from ..metrics.wasserstein import wasserstein_distance_1d
 from .base import Target
@@ -86,17 +86,18 @@ class BayesianTarget(Target):
     WARNING: none of these has a known log Z, and none has a reference ensemble in the literature
     -- Blessing et al. 2024 report only ELBO/EUBO on them. The reference draws here are generated
     by Stan, by gen/stan/generate.py, and only written out once R-hat, ESS and divergence checks
-    pass. Until that has been run, test_samples() raises with the command to run.
+    pass. They are published in this library's dataset repo, and test_samples() downloads them on
+    first use.
     """
 
     truth_tier = 2
-
-    def reference_path(self):
-        """Returns the path gen/stan/generate.py writes this target's reference draws to"""
-        return cache_dir() / 'stan' / (self.name + '.npy')
+    reference_folder = 'stan'
 
     def test_samples(self, n=None, seed=None):
         """Returns Stan's reference draws, in the same unconstrained coordinates as log_prob
+
+        The first call downloads the published draws (see data.fetch_reference), and later calls
+        read the cache.
 
         Args:
             * n (int or None): Number of leading draws; None reads all (default is None)
@@ -104,13 +105,16 @@ class BayesianTarget(Target):
 
         Returns:
             * x (torch.Tensor of shape (n, dim)): Reference draws
+
+        Raises:
+            * FileNotFoundError: When the draws are neither cached nor published, naming the
+                command that generates them
+            * ValueError: When n is more than the set holds, naming the command for a larger one
         """
-        path = self.reference_path()
-        if not path.exists():
-            raise FileNotFoundError(
-                'no Stan reference draws for ' + self.name + ' at ' + str(path) + '. Generate '
-                'them with: ./venv/bin/python gen/stan/generate.py --target ' + self.name
-            )
+        path = fetch_reference(
+            self.reference_folder, self.reference_key(),
+            'Generate them with: ./venv/bin/python gen/stan/generate.py --target ' + self.name
+        )
         array = read_rows(path, n, './venv/bin/python gen/stan/generate.py --target ' + self.name
                           + ' --n_samples <n>')
         return torch.as_tensor(array, dtype=self.dtype, device=self.device)

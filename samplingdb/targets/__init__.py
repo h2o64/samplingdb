@@ -21,4 +21,4 @@ from .particles import (
 )
 from .synthetic import Funnel, ManyWell
 from .toys import Checkerboard, Rings
-from .catalog import CATALOG, PEPTIDE_NAMES, build, catalog
+from .catalog import CATALOG, PEPTIDE_NAMES, build, catalog, download_references

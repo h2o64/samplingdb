@@ -141,7 +141,7 @@ def test_the_checksum_is_verified():
 
 def has_reference(target):
     """Returns whether this library's own parallel-tempering reference set exists yet"""
-    return (cache_dir() / 'pt' / (target.name + '.npy')).exists()
+    return target.reference_path().exists()
 
 
 @pytest.mark.parametrize('target_cls', TARGETS)
@@ -149,9 +149,7 @@ def test_test_samples_is_our_own_reference_not_the_published_split(target_cls):
     """The published split stays reachable, but it is not what the panel scores against"""
     target = target_cls()
     if not has_reference(target):
-        with pytest.raises(FileNotFoundError, match='gen/parallel_tempering/generate.py'):
-            target.test_samples(n=8)
-        pytest.skip('no parallel-tempering reference for ' + target.name + ' yet')
+        pytest.skip('the parallel-tempering reference for ' + target.name + ' is not cached')
 
     ours = target.test_samples()
     assert ours.shape[1] == target.dim

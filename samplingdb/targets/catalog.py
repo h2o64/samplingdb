@@ -1,6 +1,7 @@
 # The catalog: every target this library ships, under the name it is cited by
 
 # Libraries
+from ..data import REFERENCE_CHECKSUMS, fetch_reference
 from .bayesian import LOGISTIC_DATASETS, Brownian, LGCP, LogisticRegression, Seeds
 from .mixtures import BracketTwoModes, EightGaussians, GMM40, ManyModes, MoS, TwoModes
 from .molecular import PEPTIDE_SYSTEMS, Peptide
@@ -108,3 +109,44 @@ def catalog(data=None):
         * names (list of str): Catalog keys, in catalog order
     """
     return [name for name, entry in CATALOG.items() if data is None or entry['data'] == data]
+
+
+def download_references(names=None):
+    """Downloads the published reference sets into the cache, ahead of their first use
+
+    test_samples() downloads a missing set by itself, so this is only for fetching ahead of time:
+    on a login node before a job runs on compute nodes with no internet access, for instance. A set
+    already in the cache is left as it is, so calling this twice costs nothing.
+
+        import samplingdb
+        samplingdb.download_references(['dw4', 'lj55'])  # two sets, 70 MB
+        samplingdb.download_references()                 # every published set, 3.1 GB
+
+    Args:
+        * names (list of str or None): Catalog keys; None takes every published set, without
+            building a target, so it needs none of the optional dependencies (default is None)
+
+    Returns:
+        * paths (dict): File in the dataset repo -> its path on this machine
+
+    Raises:
+        * FileNotFoundError: For a named target whose set is not published yet
+    """
+    # Name the files, by building each named target for its spec_id
+    if names is None:
+        files = list(REFERENCE_CHECKSUMS)
+    else:
+        files = []
+        for name in names:
+            target = build(name)
+            assert target.reference_folder is not None, (
+                name + ' draws its reference set exactly, so there is nothing to download')
+            files.append(target.reference_folder + '/' + target.reference_key() + '.npy')
+
+    # Fetch them
+    paths = {}
+    for file in files:
+        folder, key = file[:-len('.npy')].split('/')
+        paths[file] = fetch_reference(folder, key, 'Its test_samples() docstring says how to '
+                                                   'generate it.')
+    return paths

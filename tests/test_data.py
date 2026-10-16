@@ -5,7 +5,7 @@ import os
 import numpy as np
 import pytest
 import torch
-from samplingdb import DW4, data
+from samplingdb import DW4, Seeds, data, download_references
 from samplingdb.targets.base import spec_id
 
 
@@ -87,7 +87,7 @@ def test_a_reference_set_refuses_more_rows_than_it_holds(monkeypatch, tmp_path):
     monkeypatch.setenv('SAMPLINGDB_CACHE', str(tmp_path))
     target = DW4()
     (tmp_path / 'pt').mkdir()
-    np.save(tmp_path / 'pt' / 'dw4.npy', np.random.default_rng(0).normal(size=(16, target.dim)))
+    np.save(target.reference_path(), np.random.default_rng(0).normal(size=(16, target.dim)))
     assert len(target.test_samples()) == 16
     assert len(target.test_samples(n=16)) == 16
     with pytest.raises(ValueError, match='gen/merge_shards.py --target dw4'):
@@ -101,3 +101,62 @@ def test_assets_are_shipped_next_to_the_code():
     with pytest.raises(FileNotFoundError):
         data.load_asset('does_not_exist.npy')
     assert os.environ.get('SAMPLINGDB_CACHE') is not None
+
+
+def publish(tmp_path, target, array):
+    """Writes array where a dataset repo would serve target's reference set, returning its registry
+
+    The repo is a local folder read through a file:// URL, which urllib fetches like any other, so
+    the download path runs end to end without the network.
+    """
+    name = target.reference_folder + '/' + target.reference_key() + '.npy'
+    (tmp_path / 'repo' / target.reference_folder).mkdir(parents=True)
+    np.save(tmp_path / 'repo' / name, array)
+    return (tmp_path / 'repo').as_uri() + '/', {name: data.sha256(tmp_path / 'repo' / name)}
+
+
+def test_a_published_reference_set_is_downloaded_once_into_the_cache(monkeypatch, tmp_path):
+    """A cache miss downloads the published set to the path the generators write, then reads it"""
+    monkeypatch.setenv('SAMPLINGDB_CACHE', str(tmp_path / 'cache'))
+    target = DW4()
+    array = np.random.default_rng(0).normal(size=(16, target.dim)).astype(np.float32)
+    url, checksums = publish(tmp_path, target, array)
+    monkeypatch.setattr(data, 'REFERENCE_URL', url)
+    monkeypatch.setattr(data, 'REFERENCE_CHECKSUMS', checksums)
+
+    # The first call downloads, into the generators' own layout
+    x = target.test_samples(n=16)
+    assert target.reference_path() == tmp_path / 'cache' / 'pt' / (target.reference_key() + '.npy')
+    assert target.reference_path().exists()
+    assert np.array_equal(np.load(target.reference_path()), array)
+
+    # Later calls read the cache, so the repo can go away
+    (tmp_path / 'repo' / list(checksums)[0]).unlink()
+    assert torch.equal(target.test_samples(n=16), x)
+
+    # download_references returns the same file, by catalog name
+    assert download_references(['dw4']) == {list(checksums)[0]: target.reference_path()}
+
+
+def test_a_download_that_fails_its_checksum_is_not_kept(monkeypatch, tmp_path):
+    """A corrupted download raises and leaves nothing behind for the next call to read"""
+    monkeypatch.setenv('SAMPLINGDB_CACHE', str(tmp_path / 'cache'))
+    target = DW4()
+    url, checksums = publish(tmp_path, target, np.zeros((4, target.dim), dtype=np.float32))
+    monkeypatch.setattr(data, 'REFERENCE_URL', url)
+    monkeypatch.setattr(data, 'REFERENCE_CHECKSUMS', {name: '0' * 64 for name in checksums})
+    with pytest.raises(ValueError, match='sha256 mismatch'):
+        target.test_samples()
+    assert list((tmp_path / 'cache' / 'pt').iterdir()) == []
+
+
+def test_an_unpublished_reference_set_names_the_command_that_generates_it(monkeypatch, tmp_path):
+    """Neither cached nor published, test_samples says where it looked and how to make the set"""
+    monkeypatch.setenv('SAMPLINGDB_CACHE', str(tmp_path))
+    monkeypatch.setattr(data, 'REFERENCE_CHECKSUMS', {})
+    target = Seeds()
+    with pytest.raises(FileNotFoundError, match='gen/stan/generate.py') as error:
+        target.test_samples()
+    assert data.REFERENCE_REPO in str(error.value)
+    assert str(target.reference_path()) in str(error.value)
+

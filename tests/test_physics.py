@@ -363,7 +363,7 @@ def test_swap_monte_carlo_is_stationary_for_the_released_ensemble():
 
 def has_generated(target):
     """Returns whether this library's own swap-Monte-Carlo reference exists yet"""
-    return (cache_dir() / 'swapmc' / (target.name + '.npy')).exists()
+    return target.reference_path().exists()
 
 
 def test_the_relaxation_time_is_measured_not_assumed():
@@ -412,9 +412,7 @@ def test_our_generated_reference_matches_the_released_one():
     """
     target = KobAndersen2D(temperature=0.32)
     if not has_generated(target):
-        with pytest.raises(FileNotFoundError, match='gen/swap_mc/generate.py'):
-            target.test_samples(n=8)
-        pytest.skip('no generated reference for ' + target.name + ' yet')
+        pytest.skip('the swap-Monte-Carlo reference for ' + target.name + ' is not cached')
 
     ours = target.test_samples(n=2000)
     released = target.released_samples(n=4000)

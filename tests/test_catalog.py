@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import torch
 from samplingdb import CATALOG, LJ55, Target, build, catalog
+from samplingdb.data import REFERENCE_CHECKSUMS
 from samplingdb.targets.base import generator, spec_id
 
 # A physically sensible evaluation scale per target, for the ones that live on a Gaussian blob
@@ -169,10 +170,22 @@ def test_every_feature_takes_any_batch_size(name):
         assert torch.equal(getattr(built, feature)(x), expected), feature
 
 
+def published_file(built):
+    """Returns the dataset-repo path of a target's reference set, published or not"""
+    return built.reference_folder + '/' + built.reference_key() + '.npy'
+
+
 @pytest.mark.parametrize('name', catalogued())
 def test_ground_truth_is_either_usable_or_says_what_is_missing(name):
-    """A reference set loads at the right shape, or raises naming the command that makes it"""
+    """A reference set loads at the right shape, is published, or raises naming its command
+
+    A published set that is not cached is not downloaded here: the catalog's run to 3 GB, and its
+    download is tested in test_data.py on a local repo.
+    """
     built = target(name, **uncompiled(name))
+    if (built.reference_folder is not None and not built.reference_path().exists()
+            and published_file(built) in REFERENCE_CHECKSUMS):
+        return
     try:
         reference = built.test_samples(n=8)
     except NotImplementedError as error:
@@ -201,6 +214,24 @@ def test_no_two_targets_share_a_name_or_a_train_cache_key():
         assert key not in cache_keys, key + ' is shared by ' + cache_keys.get(key, '?')
         cache_keys[key] = name
     assert len(names) >= 13
+
+
+@pytest.mark.parametrize('name', catalogued())
+def test_a_published_reference_set_is_the_current_density(name):
+    """Every published file of a target carries its CURRENT spec_id
+
+    A density change moves spec_id and with it the file test_samples() asks for, so the published
+    set of the old density is never read back. This catches the change before release: a target
+    whose published file carries another spec_id needs its set regenerated and published again.
+    """
+    built = target(name, **uncompiled(name))
+    if built.reference_folder is None:
+        return
+    prefix = built.reference_folder + '/' + built.name + '_'
+    for file in REFERENCE_CHECKSUMS:
+        if file.startswith(prefix) and re.fullmatch('[0-9a-f]{8}', file[len(prefix):-4]):
+            assert file == published_file(built), (
+                file + ' is published, but ' + name + ' now reads ' + published_file(built))
 
 
 @pytest.mark.parametrize('name', catalogued())

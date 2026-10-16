@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pytest
 import torch
-from samplingdb import Brownian, LGCP, LogisticRegression, Seeds
+from samplingdb import Brownian, LGCP, LogisticRegression, Seeds, data
 from samplingdb.data import cache_dir
 from samplingdb.targets import score_autograd
 from samplingdb.targets.base import generator
@@ -139,13 +139,12 @@ def test_lgcp_kernel_and_counts():
     assert torch.allclose(whitened.positions(x), field)
 
 
-def test_test_samples_says_how_to_generate_them():
-    """A missing reference set names the command rather than failing obscurely"""
-    target = Seeds()
-    if target.reference_path().exists():
-        pytest.skip('the Stan reference draws are already generated')
+def test_test_samples_says_how_to_generate_them(monkeypatch, tmp_path):
+    """A set neither cached nor published names the command rather than failing obscurely"""
+    monkeypatch.setenv('SAMPLINGDB_CACHE', str(tmp_path))
+    monkeypatch.setattr(data, 'REFERENCE_CHECKSUMS', {})
     with pytest.raises(FileNotFoundError, match='gen/stan/generate.py'):
-        target.test_samples()
+        Seeds().test_samples()
 
 
 @pytest.mark.parametrize('name', LOGISTIC + ['seeds', 'brownian'])

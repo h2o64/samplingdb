@@ -51,9 +51,7 @@ def reference_ensemble(target, n=None):
     force field, the metrics and the integrator stay covered -- what they check is not the
     ensemble's quality.
     """
-    from samplingdb.data import cache_dir
-
-    if (cache_dir() / 'md' / (target.name + '.npy')).exists():
+    if target.reference_path().exists():
         return target.test_samples(n)
     return target.load_split(target.reference_split, n=n)
 
@@ -844,8 +842,8 @@ def test_the_batched_integrator_matches_openmms_own():
 
 
 @needs_openmm
-def test_generated_samples_names_its_generator_until_it_exists():
-    """Absent, it names the command that would make it; present, it IS the reference
+def test_generated_samples_is_the_reference():
+    """generated_samples and test_samples read the same ensemble
 
     generated_samples predates the replica-exchange ensemble becoming test_samples and now reads
     the same file, so the two agreeing is the property to assert. What must never happen is the
@@ -854,11 +852,9 @@ def test_generated_samples_names_its_generator_until_it_exists():
     if not has_pdb('Ace-A-Nme'):
         pytest.skip('the released PDB is not cached')
     target = peptide('Ace-A-Nme')
-    try:
-        ours = target.generated_samples(n=64)
-    except FileNotFoundError as error:
-        assert 'gen/md/generate.py' in str(error)
-        return
+    if not target.reference_path().exists():
+        pytest.skip('the replica-exchange ensemble is not cached')
+    ours = target.generated_samples(n=64)
     assert ours.shape == (64, target.dim)
 
     # Once it exists it is the reference, so these are the same ensemble
