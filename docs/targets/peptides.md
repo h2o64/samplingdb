@@ -77,7 +77,7 @@ features to 1e-7, and the k-means divergences fall inside scikit-learn's own see
 
 | Split | How it is built |
 | --- | --- |
-| test | This library's replica-exchange molecular dynamics with solute tempering, `gen/md/generate.py`, read from `md/<name>.npy` in the cache: 100 000 structures, 10 000 for chignolin. See [Reference sets](../reference-sets.md#replica-exchange-md-peptides). |
+| test | This library's replica-exchange molecular dynamics with solute tempering, `gen/md/generate.py`, published as `md/<name>_<spec_id>.npy` and downloaded on first use: 100 000 structures. Chignolin's set, planned at 10 000 structures, is not published yet. See [Reference sets](../reference-sets.md#replica-exchange-md-peptides). |
 | `load_split('train' \| 'val' \| 'test')` | The released SBG frames, centred on load. Use these to compare with numbers reported against them. |
 | train | The pretraining protocol of Nam et al. 2025: 100 ps of Langevin dynamics at the system's temperature and friction, 1 fs timestep, from the minimised released structure. It is one trajectory, so `n` sets the stride between kept frames. |
 

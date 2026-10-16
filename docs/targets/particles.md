@@ -43,7 +43,7 @@ The binning is DEM's: 200 bins over the reference distances' own range, and 100 
 
 | Split | How it is built |
 | --- | --- |
-| test | This library's non-reversible parallel tempering, `gen/parallel_tempering/generate.py`, read from `pt/<name>.npy` in the cache. See [Reference sets](../reference-sets.md#parallel-tempering-particles-and-the-binary-glass). |
+| test | This library's non-reversible parallel tempering, `gen/parallel_tempering/generate.py`, published as `pt/<name>_<spec_id>.npy` and downloaded on first use. See [Reference sets](../reference-sets.md#parallel-tempering-particles-and-the-binary-glass). |
 | `load_split('train' \| 'val' \| 'test')` | The published splits of Klein et al. 2023, fetched from `jarridrb/DEM` at a pinned commit and checksum: 100 000 train and 10 000 each for val and test, centred on load. Use these to compare with numbers reported against them. |
 | train | One Metropolis chain, burn-in included and nothing discarded, from a fixed lattice at the step size of Köhler et al. 2020 (0.5 for DW-4, 0.025 for Lennard-Jones). |
 

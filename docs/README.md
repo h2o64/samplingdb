@@ -11,5 +11,5 @@
 - [Metrics](metrics.md): `compute_metrics`, the standard panel, each family's panel, binning
 - [Baselines](baselines.md): RWMH, ULA, MALA, HMC, non-reversible parallel tempering, swap Monte
   Carlo
-- [Reference sets](reference-sets.md): the generators in `gen/`, their acceptance gates, and the
-  audits
+- [Reference sets](reference-sets.md): the generators in `gen/`, their acceptance gates, the
+  audits, and how the sets are published

@@ -55,7 +55,7 @@ minimum-image distance, so `dist_out_of_range` is 0. The energy edges come from 
 
 | Split | How it is built |
 | --- | --- |
-| test, ternary | This library's swap Monte Carlo, `gen/swap_mc/generate.py`, read from `swapmc/<name>.npy` in the cache. See [Reference sets](../reference-sets.md#swap-monte-carlo-the-ternary-glass). |
-| test, binary | This library's non-reversible parallel tempering, `gen/parallel_tempering/generate.py`, read from `pt/<name>.npy`. Cheng et al. 2026 published no configurations. |
+| test, ternary | This library's swap Monte Carlo, `gen/swap_mc/generate.py`, published as `swapmc/<name>_<spec_id>.npy` and downloaded on first use. See [Reference sets](../reference-sets.md#swap-monte-carlo-the-ternary-glass). |
+| test, binary | This library's non-reversible parallel tempering, `gen/parallel_tempering/generate.py`, cached as `pt/<name>_<spec_id>.npy`. No set is published yet: the one generated so far is not stationary (see [Reference sets](../reference-sets.md#parallel-tempering-particles-and-the-binary-glass)). Cheng et al. 2026 published no configurations. |
 | `released_samples()`, ternary | The released configurations, fetched from Zenodo record 17966995 (CC-BY-4.0) |
 | train | Displacement-only single-particle Metropolis, `N(0, 0.065^2)` moves, for 2000 time units (one time unit is `N` attempted moves) from a jittered square lattice: the run that shows swap moves are needed, far short of equilibrium at the low temperatures. |

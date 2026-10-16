@@ -73,7 +73,7 @@ funnels (Seeds, Brownian) have percent-level floors where the logistic regressio
 
 | Split | How it is built |
 | --- | --- |
-| test | Stan, `gen/stan/generate.py`, read from `stan/<name>.npy` in the cache. The Stan models are written in this library's coordinates and checked against the torch density before sampling. See [Reference sets](../reference-sets.md#stan-posteriors). |
+| test | Stan, `gen/stan/generate.py`, published as `stan/<name>_<spec_id>.npy` and downloaded on first use. The Stan models are written in this library's coordinates and checked against the torch density before sampling. See [Reference sets](../reference-sets.md#stan-posteriors). |
 | train | A 500-step MALA chain from a prior draw. It is informal: useful as a warm start, not for evaluation. The observed data on the target is this tier's real training data. |
 
 Brownian's reference posterior gives scale means of 0.1133 (innovation) and 0.1137 (observation).
