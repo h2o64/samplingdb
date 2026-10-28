@@ -85,7 +85,7 @@ and 0.52 for the train split, against 0.80 and 0.002 for 512 other test draws.
   <img alt="Thirty single test draws of the LGCP intensity field with the pine saplings on top" src="../figures/images/posteriors_lgcp_draws_light.gif">
 </picture>
 
-Thirty single test draws of the intensity field, on one logarithmic scale. Each draw is far rougher
+Thirty single test draws of the intensity field, on one linear scale. Each draw is far rougher
 than the posterior mean: the kernel correlates cells over 40 beta = 1.2 cells, the structure
 `neighbour_correlation_err` measures.
 

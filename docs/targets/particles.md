@@ -62,8 +62,8 @@ The binning is DEM's: 200 bins over the reference distances' own range, and 100 
 </picture>
 
 The panel of `train_samples(n=2048)` against the first 2048 test configurations, from
-`compute_metrics(train, ref_samples=test, return_hist=True)`. Inside the edges each curve is the
-panel's own histogram. The shaded bands lie outside the edges, where the panel drops mass without
+`compute_metrics(train, ref_samples=test, return_hist=True)`, drawn on bins half as wide as the
+panel's, each bin the share of all the samples it holds. The shaded bands lie outside the edges, where the panel drops mass without
 counting it in the total variation. `*_out_of_range` reports the dropped share of the scored samples,
 and the reference is cut the same way: 0.15% of the LJ-13 test energies lie below the -60 edge. The
 LJ-55 train chain still sits on its starting lattice, so its distances fall at the lattice spacings

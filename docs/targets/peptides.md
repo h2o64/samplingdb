@@ -113,23 +113,24 @@ energy distances and `torus_k_jsd` use every sample with its weight.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../figures/images/peptides_ramachandran_dark.png">
-  <img alt="Ramachandran free energy of the Ace-A-Nme test split with the torsion marginals of both splits, and the 32 x 32 cells js_ramachandran scores" src="../figures/images/peptides_ramachandran_light.png">
+  <img alt="Ramachandran density of the Ace-A-Nme test split with the torsion marginals of both splits, and the 32 x 32 cells js_ramachandran scores" src="../figures/images/peptides_ramachandran_light.png">
 </picture>
 
 Ace-A-Nme's train split, 2 000 frames, scored against the first 2 000 test structures. Left: the
-free energy of the whole test split in 1 kT contours, with the phi and psi marginals of both splits
-on the 64 bins `kl_phi1` and `kl_psi1` use. Right: the 32 x 32 cells of `js_ramachandran`, the
-shaded ones being the 20% that the test rows fill (`ramachandran_occupancy`) and the dots the train
-split's mass. The train split is closer on phi (`kl_phi1` 0.28) than on psi (`kl_psi1` 7.95),
+density of the whole test split in ten levels, each a tenth of its peak, with the phi and psi
+marginals of both splits on 128 bins, twice as fine as the 64 that `kl_phi1` and `kl_psi1` use.
+Alpha-L holds 1.3% of the structures and stays below the first level. Right: the 32 x 32 cells of
+`js_ramachandran`, the shaded ones being the 20% that the test rows fill
+(`ramachandran_occupancy`) and the dots the train split's mass. The train split is closer on phi (`kl_phi1` 0.28) than on psi (`kl_psi1` 7.95),
 because it holds no alpha-R structure.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../figures/images/peptides_tica_dark.png">
-  <img alt="TICA free energy of the Ace-A-Nme test split with the marginals of both splits, the k-means centres and one structure per backbone basin" src="../figures/images/peptides_tica_light.png">
+  <img alt="TICA density of the Ace-A-Nme test split with the marginals of both splits, the k-means centres and one structure per backbone basin" src="../figures/images/peptides_tica_light.png">
 </picture>
 
-The TICA plane of the upstream panel on the same two sets: the free energy of the whole test
-split, the marginals of both splits, the 20 k-means centres of `tica_k_jsd`, and the test structure
+The TICA plane of the upstream panel on the same two sets: the density of the whole test split, in
+which the alpha-L island near TIC 1 = -6 stays below the first level, the marginals of both splits, the 20 k-means centres of `tica_k_jsd`, and the test structure
 nearest the median of each backbone basin. TIC 1 spreads 100 times wider than TIC 2, so the
 k-means cells, fitted in these coordinates as the panel fits them, are bands across TIC 1: 99.9% of
 the plane's columns lie in a single cell, and the top marginal draws the cell borders. Alpha-R and
@@ -146,11 +147,11 @@ structure, reads `tica_k_jsd` 0.026 and `tica_w2` 0.45.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../figures/images/peptides_trajectory_dark.gif">
-  <img alt="The 100 ps Ace-A-Nme train trajectory and its backbone angles over the test split free energy" src="../figures/images/peptides_trajectory_light.gif">
+  <img alt="The 100 ps Ace-A-Nme train trajectory and its backbone angles over the test split density" src="../figures/images/peptides_trajectory_light.gif">
 </picture>
 
 Ace-A-Nme's train split played back, one frame every 0.5 ps over its 100 ps, superposed on the
-backbone, next to its (phi, psi) over the free energy of the test split. Every frame stays in the
+backbone, next to its (phi, psi) over the density of the test split. Every frame stays in the
 beta and PII region; counting alpha-R as phi < 0 and -125 < psi < 50 degrees and alpha-L as phi > 0,
 the test split puts 41% of its structures in alpha-R and 1.3% in alpha-L.
 

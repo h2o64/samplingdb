@@ -22,14 +22,15 @@ the working dtype.
   <img alt="The eight 2D targets: test draws, train samples and mode weights of each" src="../figures/images/synthetic_splits_light.png">
 </picture>
 
-Each 2D target's log density in ten levels of one nat, with the marginal histograms of 2048 test
-draws and 2048 train samples over the exact marginals, and below it the empirical mode weights of
-both splits against the true ones. The train chains keep the allocation of their starting points:
-`TwoModes` and
-`BracketTwoModes` come out near 1/2 : 1/2 against 2/3 : 1/3, `Rings` at 1/3 per ring against
-weights proportional to the radius, and `Checkerboard`'s light squares too heavy. On the equally
-weighted mixtures the train split's weights are right, and on `gmm40` closer to the truth than 2048
-exact draws (`tv_weights` 0.06 against 0.12), because one chain per mode is stratified sampling.
+Each 2D target's density in ten levels, each a tenth of its peak, with the marginal histograms of
+2048 test draws and 2048 train samples over the exact marginals, and below it the empirical mode
+weights of both splits against the true ones. ManyModes is drawn with ten modes,
+`ManyModes(n_modes=10)`; the catalog's `manymodes-k3` has three. The train chains keep the
+allocation of their starting points: `TwoModes` and `BracketTwoModes` come out near 1/2 : 1/2
+against 2/3 : 1/3, `Rings` at 1/3 per ring against weights proportional to the radius, and
+`Checkerboard`'s light squares too heavy. On the equally weighted mixtures the train split's weights
+are right, and on `gmm40` closer to the truth than 2048 exact draws (`tv_weights` 0.06 against
+0.12), because one chain per mode is stratified sampling.
 
 `Rings` and `Checkerboard` follow the layout of `h2o64/sde_sampler_lrds`. The parameters of `EightGaussians` are a choice:
 no two papers use the same ones.
@@ -84,9 +85,9 @@ chain of step 3 from the first mean, kept every 50 steps, never reaches the 18 e
 </picture>
 
 The exact density of the funnel's first two coordinates, with the marginals of 2048 test draws and
-2048 train samples over the exact ones; the `x_2` marginal has a logarithmic density axis. `ks_x1`
-and `tvd_x1` compare `x_1` with its exact `N(0, 3^2)`. The train chains start at the origin and
-stay between -3.6 and 4.0, so they miss the narrow neck and the wide end. `neck_var_rel_err` is the relative error on `E[exp(x_1)]`, the
+2048 train samples over the exact ones. `ks_x1` and `tvd_x1` compare `x_1` with its exact
+`N(0, 3^2)`. The train chains start at the origin and stay between -3.6 and 4.0, so they miss the
+narrow neck and the wide end. `neck_var_rel_err` is the relative error on `E[exp(x_1)]`, the
 variance of `x_2` to `x_10`; a few samples at large `x_1` carry it, so 2048 exact draws still read
 -0.34.
 
