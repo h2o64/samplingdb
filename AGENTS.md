@@ -62,6 +62,8 @@ modules (ABI mismatch):
 ./venv/bin/pip install -e ".[dev,molecular]"
 ./venv/bin/python -m pytest tests -q  # 629 tests, ~5 min with the reference sets cached and a GPU
 ./venv/bin/python examples/quickstart.py
+./venv/bin/pip install -e ".[docs]"   # matplotlib and PyMOL, only to redraw docs/figures
+./venv/bin/python docs/figures/synthetic.py  # one script per page, plus hero.py for the banner
 ```
 
 ## Layout
@@ -117,6 +119,8 @@ gen/                 maintainer-only, NOT part of the package's import graph
 tests/               conftest.py puts gen/ and gen/md/ on sys.path for the tests of the samplers
 examples/
 docs/                the user documentation: interface, targets, metrics, reference sets
+  figures/           common.py (themes, palette, writers, PyMOL), one script per page, hero.py for
+                     the README banner, and images/, every figure in a light and a dark variant
 venv/                the project's virtualenv, not packaged
 ```
 
@@ -275,3 +279,13 @@ a citation or a named reference implementation is not finished work.
 `README.md` stays a short introduction, and the pages under `docs/` state what the library does and
 the decision behind it, not how it got there. A measurement that settled a convention, or an
 alternative that was rejected, belongs in the docstring or the test that keeps it settled.
+
+Every image in the docs is drawn by a script under `docs/figures/` from the library itself
+(`build`, both splits, `compute_metrics(..., return_hist=True)`), so a number on a figure is the
+panel's own and a spec change is redrawn by rerunning the script. Each is written twice by
+`common.save` or `common.save_gif`, `<name>_light` and `<name>_dark`, and embedded in a `<picture>`
+whose dark source GitHub picks in dark mode. The colours carry one meaning everywhere: test split
+`theme['test']`, train split `theme['train']`, any other sampler `theme['sample']`, and every density
+`common.density_map` (GnBu, reversed on the dark page). A figure compares the train split with the
+test split wherever the data allows, and its caption says what to read off it without naming a
+colour.
