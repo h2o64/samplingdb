@@ -22,6 +22,8 @@ dependencies = [
 [project.optional-dependencies]
 molecular = ["openmm", "mdtraj", "huggingface_hub", "deeptime"]
 dev = ["pytest", "scikit-learn"]
+# docs renders the figures under docs/figures: matplotlib for the plots, PyMOL for the molecules
+docs = ["matplotlib", "pymol-open-source-whl"]
 
 [tool.setuptools.dynamic]
 version = {attr = "samplingdb.__version__"}
