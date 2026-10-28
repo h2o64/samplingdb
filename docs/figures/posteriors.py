@@ -4,7 +4,7 @@
 import argparse, pprint, sys, pathlib
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.colors import LogNorm, Normalize
+from matplotlib.colors import Normalize
 from scipy.stats import gaussian_kde
 from samplingdb import build
 from samplingdb.targets.bayesian import fetch_dataset
@@ -88,7 +88,7 @@ def kde_image(x, y, x_window, y_window, n_grid=200):
     return (values / values.max()).reshape(n_grid, n_grid)
 
 
-def joint(axes, theme, reference, sets, image, x_window, y_window, n_bins=50):
+def joint(axes, theme, reference, sets, image, x_window, y_window, n_bins=100):
     """Draws a joint plot: the reference density in the centre, both splits in the marginals
 
     The centre is the density of the reference draws alone; the test and train splits are read in
@@ -102,7 +102,7 @@ def joint(axes, theme, reference, sets, image, x_window, y_window, n_bins=50):
         * image (numpy.ndarray): The reference density on the window, from kde_image
         * x_window (tuple of two floats): Horizontal extent
         * y_window (tuple of two floats): Vertical extent
-        * n_bins (int): Bins per marginal (default is 50)
+        * n_bins (int): Bins per marginal (default is 100)
     """
     centre, top, right = axes
     centre.imshow(image, origin='lower', extent=(*x_window, *y_window), cmap=density_map(theme),
@@ -293,18 +293,10 @@ lgcp_fields = {}
 for split, x in [('test', test), ('train', train)]:
     field = lgcp.positions(x).numpy()
     lgcp_fields[split] = {'intensity': grid(np.exp(field).mean(0)), 'std': grid(field.std(0))}
-intensity_norm = LogNorm(*np.quantile(np.concatenate(
-    [entry['intensity'].ravel() for entry in lgcp_fields.values()]), [0.01, 0.99]))
+intensity_norm = Normalize(0.0, np.quantile(np.concatenate(
+    [entry['intensity'].ravel() for entry in lgcp_fields.values()]), 0.99))
 std_norm = Normalize(*np.quantile(np.concatenate(
     [entry['std'].ravel() for entry in lgcp_fields.values()]), [0.01, 0.99]))
-
-
-def intensity_ticks(bar, norm):
-    """Labels a logarithmic intensity colorbar with plain round numbers"""
-    ticks = [value for value in [10, 25, 50, 100, 200, 400, 800, 1600]
-             if norm.vmin <= value <= norm.vmax]
-    bar.set_ticks(ticks, labels=[str(value) for value in ticks])
-    bar.ax.minorticks_off()
 
 
 def pine_dots(ax, theme, size=5):
@@ -335,9 +327,8 @@ def draw_lgcp(theme):
             spine.set_visible(True)
             spine.set_color(theme[split])
             spine.set_linewidth(1.5)
-    bar = fig.colorbar(images[0], ax=axes[:2], orientation='horizontal', shrink=0.8, aspect=30,
-                       label='posterior mean intensity, saplings per unit area')
-    intensity_ticks(bar, intensity_norm)
+    fig.colorbar(images[0], ax=axes[:2], orientation='horizontal', shrink=0.8, aspect=30,
+                 label='posterior mean intensity, saplings per unit area')
     fig.colorbar(images[2], ax=axes[2:], orientation='horizontal', shrink=0.8, aspect=30,
                  label='posterior sd of the log intensity')
     fig.supxlabel(metric_line(lgcp_scored, ['total_intensity_err', 'neighbour_correlation_err']),
@@ -352,7 +343,7 @@ save(draw_lgcp, 'posteriors_lgcp')
 
 # Single draws of the field, on one colour scale, so the correlation length shows
 draws = np.exp(lgcp.positions(test[:args.n_frames]).numpy())
-draw_norm = LogNorm(*np.quantile(draws, [0.01, 0.99]))
+draw_norm = Normalize(0.0, np.quantile(draws, 0.99))
 
 
 def draw_lgcp_frame(theme, index):
@@ -363,8 +354,7 @@ def draw_lgcp_frame(theme, index):
     pine_dots(ax, theme, size=9)
     blank(ax)
     ax.set_title('test split, draw %d of %d' % (index + 1, args.n_frames))
-    bar = fig.colorbar(image, ax=ax, shrink=0.85, label='intensity, saplings per unit area')
-    intensity_ticks(bar, draw_norm)
+    fig.colorbar(image, ax=ax, shrink=0.85, label='intensity, saplings per unit area')
     return fig
 
 

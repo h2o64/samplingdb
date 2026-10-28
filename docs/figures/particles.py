@@ -111,7 +111,7 @@ def outside_density(values, edges, x_window):
 
     Args:
         * values (numpy.ndarray of shape (n,)): Values, all of them
-        * edges (numpy.ndarray of shape (n_bins + 1,)): The panel's own edges
+        * edges (numpy.ndarray of shape (n_bins + 1,)): Edges spanning the panel's range
         * x_window (tuple of two floats): Extent of the plot
 
     Returns:
@@ -220,33 +220,34 @@ save(draw_configurations, 'particles_configurations')
 
 
 def draw_histograms(theme):
-    """Draws the distance and energy histograms of both splits on the panel's own edges"""
+    """Draws the distance and energy histograms of both splits within and beyond the panel's edges"""
     fig, axes = plt.subplots(3, 3, figsize=(8.0, 6.6), gridspec_kw={'width_ratios': [1, 1, 0.62]})
     for row, (name, entry) in enumerate(systems.items()):
         metrics = entry['metrics']
         for column, key in enumerate(['dist', 'energy']):
             ax = axes[row, column]
-            hist = entry['hist'][key]
-            edges = hist['edges'].numpy()
-            width = edges[1] - edges[0]
+            edges = entry['hist'][key]['edges'].numpy()
             span = edges[-1] - edges[0]
             x_window = (edges[0] - 0.12 * span, edges[-1] + 0.12 * span)
 
-            # Inside the edges, the histograms the panel compares, scaled back to the mass they
-            # hold; outside them, the mass the panel drops
+            # Inside the panel's edges, both splits on bins twice as fine as the panel's, each bin
+            # the share of all the samples it holds; outside them, the mass the panel drops
+            fine = np.linspace(edges[0], edges[-1], 2 * (len(edges) - 1) + 1)
+            width = fine[1] - fine[0]
             ax.axvspan(x_window[0], edges[0], color=theme['grid'], alpha=0.5, linewidth=0)
             ax.axvspan(edges[-1], x_window[1], color=theme['grid'], alpha=0.5, linewidth=0)
-            for split, values in [('test', hist['ref_hist']), ('train', hist['hist'])]:
-                inside = values.numpy() / width
-                if split == 'train':
-                    inside = inside * (1.0 - metrics[key + '_out_of_range'])
-                ax.stairs(inside, edges, color=theme[split], linewidth=1.1)
-                for side in outside_density(entry['values'][split][key], edges, x_window):
+            peaks = {}
+            for split in ['test', 'train']:
+                values = entry['values'][split][key]
+                inside = np.histogram(values, bins=fine)[0] / len(values) / width
+                peaks[split] = inside.max()
+                ax.stairs(inside, fine, color=theme[split], linewidth=1.0)
+                for side in outside_density(values, fine, x_window):
                     if side is not None and side[0].any():
-                        ax.stairs(side[0], side[1], color=theme[split], linewidth=1.1)
+                        ax.stairs(side[0], side[1], color=theme[split], linewidth=1.0)
             ax.set_xlim(*x_window)
-            peak = 3.0 * float(hist['ref_hist'].max()) / width
-            if float(hist['hist'].max()) / width > peak:
+            peak = 3.0 * peaks['test']
+            if peaks['train'] > peak:
                 ax.set_ylim(0.0, peak)
                 ax.text(0.98, 0.96, 'train peaks clipped', transform=ax.transAxes, ha='right',
                         va='top', fontsize=7, color=theme['ink'])
@@ -299,7 +300,7 @@ for step in steps:
     frames.append(image)
 test_energy = systems['lj55']['values']['test']['energy']
 energy_window = (-380.0, -215.0)
-energy_bins = np.linspace(*energy_window, 67)
+energy_bins = np.linspace(*energy_window, 133)
 
 
 def draw_chain_frame(theme, index):

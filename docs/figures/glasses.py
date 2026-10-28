@@ -258,9 +258,9 @@ def draw_structure(theme):
         energy, ref_energy = entry['energy'], entry['ref_energy']
         low = min(energy.min(), ref_energy.min())
         high = max(energy.max(), ref_energy.max())
-        edges = np.linspace(low, high, 80)
+        edges = np.linspace(low, high, 159)
         heights = [ax.hist(values, bins=edges, density=True, histtype='step', color=theme[key],
-                           linewidth=1.2)[0].max()
+                           linewidth=1.0)[0].max()
                    for values, key in [(ref_energy, 'test'), (energy, 'train')]]
         panel_edges = hist['energy']['edges'].numpy()
         ax.axvspan(panel_edges[0], panel_edges[-1], color=theme['grid'], alpha=0.5, linewidth=0)

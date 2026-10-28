@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from scipy.special import ndtr
-from samplingdb import build
+from samplingdb import ManyModes, build
 from samplingdb.targets.base import generator
 from samplingdb.targets.kernels import random_walk_mh
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -15,7 +15,7 @@ from common import blank, density_map, legend, note, save
 # Parse the arguments
 parser = argparse.ArgumentParser()
 parser.add_argument('--n_samples', type=int, default=2048)
-parser.add_argument('--n_bins', type=int, default=50)
+parser.add_argument('--n_bins', type=int, default=100)
 args = parser.parse_args()
 
 # Save the arguments in a dictionary
@@ -24,12 +24,20 @@ config = vars(args)
 # Print the config
 pprint.pprint(config)
 
-# The 2D targets, each with the square window it is drawn in
+# The 2D targets, each with the square window it is drawn in. ManyModes is drawn with ten modes,
+# where the catalog builds three, so the figure shows what the family is about
 WINDOWS = {
     'gmm40': (-45.0, 45.0), 'mos': (-16.0, 16.0), 'twomodes': (-2.0, 2.0),
-    'brackettwomodes': (-2.2, 2.2), 'manymodes-k3': (-2.5, 4.5), 'eightgaussians': (-3.0, 3.0),
-    'rings': (-6.5, 6.5), 'checkerboard': (-4.5, 4.5),
+    'brackettwomodes': (-2.2, 2.2), 'manymodes-k10': (-11.0, 11.0),
+    'eightgaussians': (-3.0, 3.0), 'rings': (-6.5, 6.5), 'checkerboard': (-4.5, 4.5),
 }
+
+
+def make(name):
+    """Builds a target by its name, ManyModes at any number of modes included"""
+    if name.startswith('manymodes-k'):
+        return ManyModes(n_modes=int(name[len('manymodes-k'):]))
+    return build(name)
 
 
 def log_density_grid(log_prob, x_window, y_window, n_grid=400):
@@ -53,13 +61,15 @@ def log_density_grid(log_prob, x_window, y_window, n_grid=400):
 
 
 def scaled(values):
-    """Maps a log density to [0, 1] over its top 10 nats, so each of ten levels is one nat
+    """Maps a log density to the density itself, scaled to [0, 1], for a ten-level image
 
-    NOTE: the top is the 99.9% quantile, so Rings' integrable spike at the origin does not set it.
-    One nat per level keeps Checkerboard's 3:1 squares (1.1 nats apart) on different levels.
+    Each level of the image is then a tenth of the peak density.
+
+    NOTE: the peak is the 99.9% quantile of the grid, so Rings' integrable spike at the origin does
+    not set it.
     """
-    top = np.quantile(values[np.isfinite(values)], 0.999)
-    return np.clip((values - top + 10.0) / 10.0, 0.0, 1.0)
+    density = np.exp(values - values[np.isfinite(values)].max())
+    return np.clip(density / np.quantile(density, 0.999), 0.0, 1.0)
 
 
 def grid_marginals(xs, ys, values):
@@ -103,8 +113,7 @@ def draw_density(ax, values, x_window, y_window, theme):
     ax.set_ylim(*y_window)
 
 
-def draw_marginal(ax, grid, exact, samples, edges, theme, vertical=False, ceiling=None,
-                  log=False):
+def draw_marginal(ax, grid, exact, samples, edges, theme, vertical=False, ceiling=None):
     """Draws an exact marginal as a filled area and the two splits' histograms over it
 
     Args:
@@ -117,8 +126,6 @@ def draw_marginal(ax, grid, exact, samples, edges, theme, vertical=False, ceilin
         * vertical (bool): Whether the marginal runs along the vertical axis (default is False)
         * ceiling (float or None): Top of the density axis; None fits everything
             (default is None)
-        * log (bool): Whether the density axis is logarithmic, down to 1e-4 of the ceiling
-            (default is False)
     """
     fill = density_map(theme)(0.45)
     if vertical:
@@ -132,17 +139,10 @@ def draw_marginal(ax, grid, exact, samples, edges, theme, vertical=False, ceilin
                   orientation='horizontal' if vertical else 'vertical')
         top = max(top, hist.max())
     top = 1.08 * top if ceiling is None else ceiling
-    bottom = 1e-4 * top if log else 0.0
     if vertical:
-        ax.set_xscale('log' if log else 'linear')
-        ax.set_xlim(bottom, top)
-        ax.set_xticks([], minor=True)
-        ax.set_xticks([])
+        ax.set_xlim(0.0, top)
     else:
-        ax.set_yscale('log' if log else 'linear')
-        ax.set_ylim(bottom, top)
-        ax.set_yticks([], minor=True)
-        ax.set_yticks([])
+        ax.set_ylim(0.0, top)
 
 
 def weight_bars(ax, true, test, train, theme):
@@ -173,7 +173,7 @@ def weight_bars(ax, true, test, train, theme):
 # Build the eight 2D targets, their two splits, their exact marginals and their mode panels
 targets = {}
 for name, window in WINDOWS.items():
-    target = build(name)
+    target = make(name)
     test = target.test_samples(n=args.n_samples)
     train = target.train_samples(n=args.n_samples)
     test_metrics, test_hist = target.compute_metrics(test, return_hist=True)
@@ -297,7 +297,7 @@ funnel_splits = {'test': funnel.test_samples(n=args.n_samples).numpy(),
                  'train': funnel.train_samples(n=args.n_samples).numpy()}
 funnel_metrics = {split: funnel.compute_metrics(torch.as_tensor(x), compute_standard_metrics=False)
                   for split, x in funnel_splits.items()}
-x1_window, x2_window = (-9.0, 9.0), (-30.0, 30.0)
+x1_window, x2_window = (-9.0, 9.0), (-12.0, 12.0)
 
 
 def funnel_log_prob(x):
@@ -311,7 +311,7 @@ funnel_p1 = np.exp(-0.5 * (funnel_x1 / funnel.scale) ** 2) / (funnel.scale * mat
 
 # The x_2 marginal mixes N(0, exp(x_1)) over x_1, a cusp at zero that a 2D grid cannot resolve, so it
 # is integrated on its own: bin masses from the conditional CDFs, on a fine x_1 grid
-x2_edges = np.linspace(*x2_window, 241)
+x2_edges = np.linspace(*x2_window, 481)
 x1_fine = np.linspace(-15.0, 15.0, 6001)
 x1_weight = np.exp(-0.5 * (x1_fine / funnel.scale) ** 2)
 x1_weight /= x1_weight.sum()
@@ -328,17 +328,16 @@ def draw_funnel(theme):
     main, top, right, corner = joint(fig, outer[0, 0], ratio=0.22)
     draw_density(main, funnel_values, x1_window, x2_window, theme)
     main.set_xticks([-8, -4, 0, 4, 8])
-    main.set_yticks([-20, 0, 20])
+    main.set_yticks([-10, 0, 10])
     for spine in ['left', 'bottom']:
         main.spines[spine].set_visible(True)
     main.set_xlabel('$x_1$')
     main.set_ylabel('$x_2$')
     draw_marginal(top, funnel_x1, funnel_p1, {split: x[:, 0] for split, x in funnel_splits.items()},
-                  np.linspace(*x1_window, 61), theme)
+                  np.linspace(*x1_window, 121), theme)
     draw_marginal(right, funnel_c2, funnel_p2,
                   {split: x[:, 1] for split, x in funnel_splits.items()},
-                  np.linspace(*x2_window, 61), theme, vertical=True,
-                  ceiling=2.0 * funnel_p2.max(), log=True)
+                  np.linspace(*x2_window, 121), theme, vertical=True)
     rows = ['                  test  train']
     for key in ['ks_x1', 'tvd_x1', 'neck_var_rel_err']:
         rows.append('%-16s %5.2f %6.2f' % (key, funnel_metrics['test'][key],
@@ -380,9 +379,9 @@ def draw_manywell(theme):
     main.set_xlabel('$x_1$ (top: pooled over the 16 wells)')
     main.set_ylabel('$x_2$')
     draw_marginal(top, well_grid_x1, well_p1, {split: pooled[split]['x1'] for split in pooled},
-                  np.linspace(*well_x1, 81), theme, ceiling=3.0)
+                  np.linspace(*well_x1, 161), theme, ceiling=3.0)
     draw_marginal(right, well_grid_x2, well_p2, {split: pooled[split]['x2'] for split in pooled},
-                  np.linspace(*well_x2, 81), theme, vertical=True, ceiling=1.2)
+                  np.linspace(*well_x2, 161), theme, vertical=True, ceiling=1.2)
 
     # 99% of the train chains never move from (1.75, 0), so both of its marginals are spikes
     top.annotate('train: a spike at 1.75', xy=(1.75, 3.0), xytext=(-2.4, 2.0), color=theme['ink'],

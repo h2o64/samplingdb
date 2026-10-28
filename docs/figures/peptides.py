@@ -141,8 +141,8 @@ def ball_and_stick(bonds=(), centre=None):
     return setup
 
 
-def free_energy(values, x_edges, y_edges, periodic, smooth=1.0):
-    """Estimates the free energy -log p of a 2D sample set on a grid, zero at its minimum
+def density(values, x_edges, y_edges, periodic, smooth=1.0):
+    """Estimates the density of a 2D sample set on a grid, scaled to one at its peak
 
     Args:
         * values (numpy.ndarray of shape (n, 2)): The two coordinates
@@ -152,38 +152,33 @@ def free_energy(values, x_edges, y_edges, periodic, smooth=1.0):
         * smooth (float): Width of the Gaussian smoothing, in bins (default is 1.0)
 
     Returns:
-        * energy (numpy.ndarray of shape (n_x, n_y)): Free energy in kT, inf where p is zero
+        * density (numpy.ndarray of shape (n_x, n_y)): Density relative to its peak
     """
     counts = np.histogram2d(values[:, 0], values[:, 1], bins=[x_edges, y_edges])[0]
     counts = gaussian_filter(counts, smooth, mode='wrap' if periodic else 'constant')
-    with np.errstate(divide='ignore'):
-        return -np.log(counts / counts.max())
+    return counts / counts.max()
 
 
-def free_energy_colours(theme, depth=1.0, top=8):
-    """Returns one colour per 1 kT band from 0 to top, the lowest free energy last"""
-    cmap = density_map(theme, depth=depth, levels=top + 1)
-    return [cmap(k / top) for k in range(1, top + 1)]
-
-
-def draw_free_energy(ax, energy, x_edges, y_edges, theme, depth=1.0, top=8):
-    """Fills the 1 kT contours of a free energy up to top, leaving the rest as the page surface"""
+def draw_density(ax, image, x_edges, y_edges, theme, depth=1.0):
+    """Fills the ten contours of a relative density, each a tenth of the peak, below the first
+    leaving the page surface"""
     x = 0.5 * (x_edges[1:] + x_edges[:-1])
     y = 0.5 * (y_edges[1:] + y_edges[:-1])
-    ax.contourf(x, y, (top - energy).T, levels=np.arange(0, top + 1),
-                colors=free_energy_colours(theme, depth, top))
+    cmap = density_map(theme, depth=depth)
+    ax.contourf(x, y, image.T, levels=np.linspace(0.1, 1.0, 10),
+                colors=[cmap(k / 9) for k in range(1, 10)], extend='neither')
 
 
-def free_energy_bar(fig, cax, theme, depth=1.0, top=8):
-    """Draws the scale of draw_free_energy's contours"""
-    colours = free_energy_colours(theme, depth, top)[::-1]
-    mappable = ScalarMappable(norm=BoundaryNorm(np.arange(top + 1), top),
-                              cmap=ListedColormap(colours))
+def density_bar(fig, cax, theme, depth=1.0):
+    """Draws the scale of draw_density's contours"""
+    cmap = density_map(theme, depth=depth)
+    mappable = ScalarMappable(norm=BoundaryNorm(np.linspace(0.0, 1.0, 11), 10),
+                              cmap=ListedColormap([cmap(k / 9) for k in range(10)]))
     bar = fig.colorbar(mappable, cax=cax, orientation='horizontal')
-    bar.set_ticks([0, top // 2, top])
+    bar.set_ticks([0.0, 0.5, 1.0])
     bar.outline.set_visible(False)
     bar.ax.tick_params(labelsize=7, length=2)
-    bar.set_label('free energy (kT)', fontsize=7.5)
+    bar.set_label('density, fraction of its peak', fontsize=7.5)
 
 
 def marginal(ax, edges, fill, test, train, theme, horizontal=False):
@@ -293,7 +288,7 @@ train = aldp.train_samples(n=args.n_samples)
 metrics, hist = aldp.compute_metrics(train, return_hist=True)
 pprint.pprint({key: round(float(value), 4) for key, value in metrics.items()})
 
-# The test split's Ramachandran free energy, from every structure of it
+# The test split's Ramachandran density, from every structure of it
 background = aldp.test_samples(n=args.n_background)
 background_angles = np.rad2deg(aldp.torsions(background).numpy())
 test_angles = np.rad2deg(aldp.torsions(test).numpy())
@@ -303,7 +298,7 @@ train_basins = np.bincount(basin(*train_angles.T), minlength=3) / len(train)
 print('test split basins (beta/PII, alpha-R, alpha-L)', np.round(background_basins, 3))
 print('train split basins (beta/PII, alpha-R, alpha-L)', np.round(train_basins, 3))
 angle_edges = np.linspace(-180.0, 180.0, 91)
-rama_energy = free_energy(background_angles, angle_edges, angle_edges, periodic=True)
+rama_density = density(background_angles, angle_edges, angle_edges, periodic=True)
 
 # Where the basin labels of a Ramachandran plane sit
 BASINS = [(r'$\beta$', -175.0, 105.0), (r'$\alpha_R$', -25.0, -45.0), (r'$\alpha_L$', 92.0, 30.0)]
@@ -357,7 +352,7 @@ def draw_trajectory_frame(theme, index):
 
     # The angles, with a trail of the last 12 ps that fades and breaks where an angle wraps
     ax = fig.add_axes([0.6, 0.17, 0.34, 0.68])
-    draw_free_energy(ax, rama_energy, angle_edges, angle_edges, theme, depth=0.6)
+    draw_density(ax, rama_density, angle_edges, angle_edges, theme, depth=0.6)
     rama_axes(ax)
     ax.set_xticks([-180, 0, 180])
     ax.set_yticks([-180, 0, 180])
@@ -375,7 +370,7 @@ def draw_trajectory_frame(theme, index):
     for label, phi, psi in BASINS:
         ax.text(phi, psi, label, color=theme['ink'], fontsize=9, ha='left', va='center',
                 path_effects=halo(theme))
-    ax.set_title('test split free energy', fontsize=9)
+    ax.set_title('test split density', fontsize=9)
     return fig
 
 
@@ -387,26 +382,26 @@ pair = aldp.ramachandran_pairs[0]
 ref_joint = histogram_2d(aldp.torsions(test).double()[:, pair], joint_edges).numpy()
 joint = histogram_2d(aldp.torsions(train).double()[:, pair], joint_edges).numpy()
 print('occupancy recomputed %.4f' % (ref_joint > 0).mean())
-marginal_edges = np.linspace(-180.0, 180.0, 65)
+marginal_edges = np.linspace(-180.0, 180.0, 129)
 
 
 def draw_ramachandran(theme):
-    """Draws the test split's Ramachandran free energy with both splits' torsion marginals, and
+    """Draws the test split's Ramachandran density with both splits' torsion marginals, and
     the 32 x 32 cells js_ramachandran compares the two splits on"""
     fig, axes = plt.subplot_mosaic([['phi', 'numbers', '.'], ['centre', 'psi', 'grid']],
                                    figsize=(8.0, 4.7), width_ratios=[4.0, 1.0, 4.2],
                                    height_ratios=[1.0, 4.0])
 
-    # The free energy of the whole test split, and the two marginals the KL and W1 compare
+    # The density of the whole test split, and the two marginals the KL and W1 compare
     ax = axes['centre']
-    draw_free_energy(ax, rama_energy, angle_edges, angle_edges, theme)
+    draw_density(ax, rama_density, angle_edges, angle_edges, theme)
     rama_axes(ax, equal=False)
     ax.set_xlabel(r'$\varphi$ (deg)')
     ax.set_ylabel(r'$\psi$ (deg)')
     for label, phi, psi in BASINS:
         ax.text(phi, psi, label, color=theme['ink'], fontsize=9, va='center',
                 path_effects=halo(theme))
-    free_energy_bar(fig, ax.inset_axes([0.55, 0.1, 0.4, 0.035]), theme)
+    density_bar(fig, ax.inset_axes([0.55, 0.1, 0.4, 0.035]), theme)
     marginal(axes['phi'], marginal_edges, background_angles[:, 0], test_angles[:, 0],
              train_angles[:, 0], theme)
     axes['phi'].set_xlim(-180, 180)
@@ -543,7 +538,7 @@ pad = 0.06 * (tic_upper - tic_lower)
 tic_lower, tic_upper = tic_lower - pad, tic_upper + pad
 x_edges = np.linspace(tic_lower[0], tic_upper[0], 121)
 y_edges = np.linspace(tic_lower[1], tic_upper[1], 121)
-tic_energy = free_energy(background_tics, x_edges, y_edges, periodic=False)
+tic_density = density(background_tics, x_edges, y_edges, periodic=False)
 print('tica ranges', tic_lower, tic_upper, 'spread ratio %.0f'
       % (background_tics[:, 0].std() / background_tics[:, 1].std()))
 
@@ -573,12 +568,12 @@ for label, (symbol, _, _) in enumerate(BASINS):
 
 
 def draw_tica(theme):
-    """Draws the test split's TICA free energy with both splits' marginals, the panel's k-means
+    """Draws the test split's TICA density with both splits' marginals, the panel's k-means
     cells, and one structure per backbone basin"""
     fig, axes = plt.subplot_mosaic([['tic1', 'numbers'], ['centre', 'tic2']], figsize=(8.0, 4.8),
                                    width_ratios=[5.0, 1.0], height_ratios=[1.0, 4.0])
     ax = axes['centre']
-    draw_free_energy(ax, tic_energy, x_edges, y_edges, theme)
+    draw_density(ax, tic_density, x_edges, y_edges, theme)
     ax.scatter(*centres.T, s=14, marker='+', color=theme['ink'], linewidths=0.8,
                path_effects=halo(theme))
     for inset in insets:
@@ -590,7 +585,7 @@ def draw_tica(theme):
     ax.set_ylim(tic_lower[1], tic_upper[1])
     ax.set_xlabel('TIC 1')
     ax.set_ylabel('TIC 2')
-    free_energy_bar(fig, ax.inset_axes([0.27, 0.08, 0.26, 0.035]), theme)
+    density_bar(fig, ax.inset_axes([0.27, 0.08, 0.26, 0.035]), theme)
 
     # One structure per basin, in the empty band between the alpha-L island and the rest
     for k, inset in enumerate(sorted(insets, key=lambda inset: inset['tic'][0])):
@@ -601,12 +596,12 @@ def draw_tica(theme):
                  fontsize=9, ha='center', va='top')
 
     # The marginals, with the cell borders on TIC 1, the one coordinate the cells split
-    marginal(axes['tic1'], x_edges[::2], background_tics[:, 0], test_tics[:, 0], train_tics[:, 0],
+    marginal(axes['tic1'], x_edges, background_tics[:, 0], test_tics[:, 0], train_tics[:, 0],
              theme)
     axes['tic1'].set_xlim(tic_lower[0], tic_upper[0])
     for border in borders:
         axes['tic1'].axvline(border, color=theme['muted'], linewidth=0.5)
-    marginal(axes['tic2'], y_edges[::2], background_tics[:, 1], test_tics[:, 1], train_tics[:, 1],
+    marginal(axes['tic2'], y_edges, background_tics[:, 1], test_tics[:, 1], train_tics[:, 1],
              theme, horizontal=True)
     axes['tic2'].set_ylim(tic_lower[1], tic_upper[1])
     ax = axes['numbers']

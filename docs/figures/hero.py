@@ -8,7 +8,7 @@ import mdtraj
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, FancyBboxPatch
 from scipy.ndimage import gaussian_filter
-from samplingdb import build
+from samplingdb import ManyModes, build
 from samplingdb.targets.bayesian import fetch_dataset
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from common import density_map, pymol_render, save, start_pymol
@@ -29,7 +29,7 @@ FAMILIES = [
     ('Synthetic', 'tier 0', 4, [
         ('gmm40', 'gmm40', 0, 0, 1), ('mos', 'mos', 0, 1, 1), ('twomodes', 'twomodes', 0, 2, 1),
         ('brackettwomodes', 'brackettwomodes', 0, 3, 1),
-        ('manymodes-k3', 'manymodes-k3', 1, 0, 1), ('eightgaussians', 'eightgaussians', 1, 1, 1),
+        ('manymodes-k10', 'manymodes-k10', 1, 0, 1), ('eightgaussians', 'eightgaussians', 1, 1, 1),
         ('rings', 'rings', 1, 2, 1), ('checkerboard', 'checkerboard', 1, 3, 1),
         ('funnel', 'funnel', 2, 0, 3), ('manywell', 'manywell', 2, 3, 1),
     ]),
@@ -75,26 +75,27 @@ def card_map(theme, depth=1.0):
     return density_map(dict(theme, surface=CARDS[theme['name']]), depth)
 
 
-def levels(log_density, nats=10.0):
-    """Maps a log density to [0, 1] over its top nats, one nat per level of a ten-level map"""
-    top = np.quantile(log_density[np.isfinite(log_density)], 0.999)
-    return np.clip((log_density - top + nats) / nats, 0.0, 1.0)
+def levels(density):
+    """Scales a density to [0, 1] for a ten-level map, each level a tenth of the peak
+
+    NOTE: the peak is the 99.9% quantile, so Rings' integrable spike at the origin does not set it.
+    """
+    return np.clip(density / np.quantile(density, 0.999), 0.0, 1.0)
 
 
-def grid_log_prob(log_prob, x_window, y_window, n_x=300, n_y=300):
-    """Evaluates a 2D log density on a grid, rows along y"""
+def grid_density(log_prob, x_window, y_window, n_x=300, n_y=300):
+    """Evaluates an unnormalised 2D density on a grid, rows along y, from its log"""
     xs = torch.linspace(*x_window, n_x, dtype=torch.float64)
     ys = torch.linspace(*y_window, n_y, dtype=torch.float64)
     grid = torch.stack(torch.meshgrid(xs, ys, indexing='xy'), dim=-1).reshape(-1, 2)
-    return log_prob(grid).reshape(n_y, n_x).numpy()
+    values = log_prob(grid).reshape(n_y, n_x).numpy()
+    return np.exp(values - values[np.isfinite(values)].max())
 
 
-def sample_log_density(x, y, x_window, y_window, n_bins=120, smooth=2.0):
-    """Estimates a 2D log density from samples by a smoothed histogram, rows along y"""
+def sample_density(x, y, x_window, y_window, n_bins=120, smooth=2.0):
+    """Estimates a 2D density from samples by a smoothed histogram, rows along y"""
     hist, _, _ = np.histogram2d(y, x, bins=n_bins, range=[y_window, x_window])
-    hist = gaussian_filter(hist, smooth)
-    with np.errstate(divide='ignore'):
-        return np.log(hist)
+    return gaussian_filter(hist, smooth)
 
 
 def pdb_string(topology, positions):
@@ -141,25 +142,32 @@ def fitted_render(pdb, width, height, setup, fill=0.9):
     return pymol_render(pdb, width, height, setup, view=tuple(view))
 
 
-# Every 2D synthetic density, on the windows of the synthetic page
+def make(name):
+    """Builds a target by its name, ManyModes at any number of modes included"""
+    if name.startswith('manymodes-k'):
+        return ManyModes(n_modes=int(name[len('manymodes-k'):]))
+    return build(name)
+
+
+# Every 2D synthetic density, on the windows of the synthetic page, ManyModes with ten modes
 tiles = {}
 windows = {'gmm40': (-45.0, 45.0), 'mos': (-16.0, 16.0), 'twomodes': (-2.0, 2.0),
-           'brackettwomodes': (-2.2, 2.2), 'manymodes-k3': (-2.5, 4.5),
+           'brackettwomodes': (-2.2, 2.2), 'manymodes-k10': (-11.0, 11.0),
            'eightgaussians': (-3.0, 3.0), 'rings': (-6.5, 6.5), 'checkerboard': (-4.5, 4.5)}
 for name, window in windows.items():
-    tiles[name] = {'kind': 'image', 'image': levels(grid_log_prob(build(name).log_prob, window,
+    tiles[name] = {'kind': 'image', 'image': levels(grid_density(make(name).log_prob, window,
                                                                  window))}
 
 # The funnel's first two coordinates, and ManyWell's first quartic coordinates of two wells, whose
 # product shows four of the 2^16 modes with their unequal weights
 funnel = build('funnel')
-tiles['funnel'] = {'kind': 'image', 'image': levels(grid_log_prob(
+tiles['funnel'] = {'kind': 'image', 'image': levels(grid_density(
     lambda x: -0.5 * (x[:, 0] / 3.0) ** 2 - 0.5 * x[:, 0] - 0.5 * x[:, 1] ** 2 * torch.exp(-x[:, 0]),
-    (-9.0, 9.0), (-25.0, 25.0), n_x=600, n_y=200))}
+    (-9.0, 9.0), (-12.0, 12.0), n_x=600, n_y=200))}
 manywell = build('manywell')
-tiles['manywell'] = {'kind': 'image', 'image': levels(grid_log_prob(
+tiles['manywell'] = {'kind': 'image', 'image': levels(grid_density(
     lambda x: manywell.log_prob_1d(x[:, 0]) + manywell.log_prob_1d(x[:, 1]),
-    (-2.6, 2.6), (-2.6, 2.6)), nats=6.0)}
+    (-2.6, 2.6), (-2.6, 2.6)))}
 
 # The particle systems: one reference configuration each
 dw4 = build('dw4').test_samples(n=1)[0].reshape(4, 2).numpy()
@@ -175,13 +183,13 @@ for name in ['ionosphere', 'sonar', 'german-credit', 'breast-cancer']:
     np.fill_diagonal(correlation, 0.0)
     i, j = np.unravel_index(np.argmax(correlation), correlation.shape)
     u, v = (x[:, i] - x[:, i].mean()) / x[:, i].std(), (x[:, j] - x[:, j].mean()) / x[:, j].std()
-    tiles[name] = {'kind': 'image', 'image': levels(sample_log_density(u, v, (-4.0, 4.0),
-                                                                      (-4.0, 4.0)), nats=8.0)}
+    tiles[name] = {'kind': 'image', 'image': levels(sample_density(u, v, (-4.0, 4.0),
+                                                                  (-4.0, 4.0)))}
 
 # Seeds: the hierarchical funnel between log tau and one random effect
 seeds = build('seeds').test_samples(n=args.n_samples).numpy()
-tiles['seeds'] = {'kind': 'image', 'image': levels(sample_log_density(
-    seeds[:, -1], seeds[:, 4], (-1.0, 7.0), (-1.6, 1.0)), nats=8.0)}
+tiles['seeds'] = {'kind': 'image', 'image': levels(sample_density(
+    seeds[:, -1], seeds[:, 4], (-1.0, 7.0), (-1.6, 1.0)))}
 
 # Brownian motion: the posterior bands of the path and the twenty observations
 brownian = build('brownian')
@@ -193,11 +201,9 @@ tiles['brownian'] = {'kind': 'bands', 'quantiles': np.quantile(paths, [0.05, 0.2
 # LGCP: the posterior mean intensity with the pines, and one draw in whitened coordinates
 lgcp = build('lgcp')
 field = lgcp.test_samples(n=2000)
-log_intensity = torch.log(torch.exp(field).mean(0)).reshape(40, 40).numpy()
-low, high = np.quantile(log_intensity, [0.01, 0.999])
+intensity = torch.exp(field).mean(0).reshape(40, 40).numpy()
 pines = np.loadtxt(fetch_dataset('pines.csv'), delimiter=',', skiprows=1, usecols=(1, 2))
-tiles['lgcp'] = {'kind': 'field', 'image': np.clip((log_intensity - low) / (high - low), 0.0, 1.0),
-                 'points': pines}
+tiles['lgcp'] = {'kind': 'field', 'image': levels(intensity), 'points': pines}
 whitened = build('lgcp-whitened').test_samples(n=1)[0].reshape(40, 40).numpy()
 tiles['lgcp-whitened'] = {'kind': 'field', 'image': np.clip((whitened + 3.0) / 6.0, 0.0, 1.0),
                           'points': None}
