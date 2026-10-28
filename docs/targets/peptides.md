@@ -20,6 +20,15 @@ Ala4 of Nam et al. 2025; `AAA` and `AAAAAA` come from Tan et al. 2025.
 Every input file is read at a pinned revision of that dataset and checked against a pinned sha256
 (`SBG_REVISION`, `SBG_CHECKSUMS`).
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../figures/images/peptides_molecules_dark.png">
+  <img alt="One test structure of each of the four peptides" src="../figures/images/peptides_molecules_light.png">
+</picture>
+
+One structure from each test split, drawn at the same scale. On Ace-A-Nme the two bonds the panel's
+torsions turn about are marked: phi about N-Calpha and psi about Calpha-C. Ace-A-Nme's panel reads
+`phi1` and `psi1` only; the longer peptides add one phi, psi and omega per residue.
+
 ## The energy
 
 OpenMM builds each system and owns every parameter: force-field files, atom typing and topology.
@@ -63,6 +72,18 @@ does: a centre is an atom with four bonds, at least three of them to heavy atoms
 handedness is the sign of the triple product of three bond vectors. A sample whose centres disagree
 with each other has no mirror image in the reference and is scored as it is.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../figures/images/peptides_chirality_dark.png">
+  <img alt="A test structure of Ace-A-Nme and its mirror image" src="../figures/images/peptides_chirality_light.png">
+</picture>
+
+A test structure of Ace-A-Nme and its mirror image, seen down the bond from the alpha carbon to the
+carbonyl carbon. Both have an energy of -29.82 kT. Seen this way the bonds to N, H alpha and C beta
+turn clockwise in the reference and counterclockwise in the mirror image, and the triple product of
+the three bond vectors, which the panel reads, goes from -1 to +1. A sample of the mirror
+handedness is mirrored back before scoring, and `correct_chirality_rate` is the fraction that did
+not need it.
+
 The last row reproduces `transferable-samplers`' metrics in batched torch and was checked against
 their implementation: `energy_w1`, `energy_w2` and `tica_w2` agree to 1e-12, `torus_w2` and the TICA
 features to 1e-7, and the k-means divergences fall inside scikit-learn's own seed spread.
@@ -90,6 +111,31 @@ energy distances and `torus_k_jsd` use every sample with its weight.
   spanning both sets, one Ramachandran per residue under `'ramachandran'`, and the TICA plane under
   `'tica'`.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../figures/images/peptides_ramachandran_dark.png">
+  <img alt="Ramachandran free energy of the Ace-A-Nme test split with the torsion marginals of both splits, and the 32 x 32 cells js_ramachandran scores" src="../figures/images/peptides_ramachandran_light.png">
+</picture>
+
+Ace-A-Nme's train split, 2 000 frames, scored against the first 2 000 test structures. Left: the
+free energy of the whole test split in 1 kT contours, with the phi and psi marginals of both splits
+on the 64 bins `kl_phi1` and `kl_psi1` use. Right: the 32 x 32 cells of `js_ramachandran`, the
+shaded ones being the 20% that the test rows fill (`ramachandran_occupancy`) and the dots the train
+split's mass. The train split is closer on phi (`kl_phi1` 0.28) than on psi (`kl_psi1` 7.95),
+because it holds no alpha-R structure.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../figures/images/peptides_tica_dark.png">
+  <img alt="TICA free energy of the Ace-A-Nme test split with the marginals of both splits, the k-means centres and one structure per backbone basin" src="../figures/images/peptides_tica_light.png">
+</picture>
+
+The TICA plane of the upstream panel on the same two sets: the free energy of the whole test
+split, the marginals of both splits, the 20 k-means centres of `tica_k_jsd`, and the test structure
+nearest the median of each backbone basin. TIC 1 spreads 100 times wider than TIC 2, so the
+k-means cells, fitted in these coordinates as the panel fits them, are bands across TIC 1: 99.9% of
+the plane's columns lie in a single cell, and the top marginal draws the cell borders. Alpha-R and
+beta separate along TIC 2, which the cells barely resolve, and the train split, which has no alpha-R
+structure, reads `tica_k_jsd` 0.026 and `tica_w2` 0.45.
+
 ## Splits
 
 | Split | How it is built |
@@ -97,6 +143,16 @@ energy distances and `torus_k_jsd` use every sample with its weight.
 | test | This library's replica-exchange molecular dynamics with solute tempering, `gen/md/generate.py`, published as `md/<name>_<spec_id>.npy` and downloaded on first use: 100 000 structures. Its integrator is unadjusted BAOAB at 1 fs, which puts the mean energy about 0.1 kT above the exact law (measured on Ace-A-Nme). See [Reference sets](../reference-sets.md#replica-exchange-md-peptides). |
 | `load_split('train' \| 'val' \| 'test')` | The released SBG frames, centred on load. The TICA projection is fitted on the test split; they are not a reference set. |
 | train | The pretraining protocol of Nam et al. 2025: 100 ps of Langevin dynamics at the system's temperature and friction, 1 fs timestep, from the minimised released structure. It is one trajectory, so `n` sets the stride between kept frames. |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../figures/images/peptides_trajectory_dark.gif">
+  <img alt="The 100 ps Ace-A-Nme train trajectory and its backbone angles over the test split free energy" src="../figures/images/peptides_trajectory_light.gif">
+</picture>
+
+Ace-A-Nme's train split played back, one frame every 0.5 ps over its 100 ps, superposed on the
+backbone, next to its (phi, psi) over the free energy of the test split. Every frame stays in the
+beta and PII region; counting alpha-R as phi < 0 and -125 < psi < 50 degrees and alpha-L as phi > 0,
+the test split puts 41% of its structures in alpha-R and 1.3% in alpha-L.
 
 The test split is this library's own because the released splits are far from independent: their
 integrated autocorrelation times range from 4.3 stored frames on `AAA` to 60.7 on `Ace-AAA-Nme`,

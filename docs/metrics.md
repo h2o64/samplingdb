@@ -45,6 +45,17 @@ instead. `metrics.compute_standard_metrics` can still be called directly on any 
 nothing is binned or dropped. A row with a non-finite coordinate is placed at whichever end of
 each projection gives the larger distance, so non-finite rows can only raise `ks`.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="figures/images/metrics_sliced_ks_dark.png">
+  <img alt="Sliced KS on TwoModes: two sample sets, their CDFs along one direction, and the KS distance on each of 128 directions" src="figures/images/metrics_sliced_ks_light.png">
+</picture>
+
+`ks` on `TwoModes`: 2048 train samples, whose mode weights are 1/2 : 1/2, against 2048 test draws
+at 2/3 : 1/3. Along the direction `u` the two projected CDFs differ by at most 0.182. `ks` is the
+mean of that distance over the 128 directions the panel draws, 0.170. Directions near 135 degrees,
+orthogonal to the line through the two modes, project both modes onto one point and see almost no
+difference.
+
 `mmd` and `w2` are quadratic, so they are computed only with `skip_costly_metrics=False`, on
 `n = min(len(samples), len(ref_samples), max_costly_samples)` rows per side, `max_costly_samples`
 being 2000. The rows are drawn with `generator`, never sliced off the front, so a chain is scored on
@@ -64,6 +75,9 @@ per well) reports four numbers on the empirical mode weights:
 | `kl_weights` | `KL(true weights \|\| empirical weights)`, infinite when a mode gets no mass |
 | `tv_weights` | `sum_k \|empirical_k - true_k\|`, twice the total variation distance |
 | `perc_forgotten_modes` | fraction of modes holding less than 5% of the smallest true weight |
+
+The [synthetic page](targets/synthetic.md#metric-panel) draws the four on GMM-40 for three samplers
+that fail in different ways.
 
 On the mixtures (`GMM40`, `MoS`, `TwoModes`, `BracketTwoModes`, `ManyModes`, `EightGaussians`) the
 empirical weight of component `k` is the (weighted) mean of its responsibility

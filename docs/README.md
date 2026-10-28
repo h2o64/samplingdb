@@ -11,3 +11,6 @@
 - [Metrics](metrics.md): `compute_metrics`, the standard panel, each family's panel, binning
 - [Reference sets](reference-sets.md): the generators and samplers in `gen/`, their acceptance
   gates, the audits, and how the sets are published
+
+Every figure in these pages is drawn by a script in [figures/](figures/) from the library itself;
+`pip install -e ".[docs]"` adds what they need.

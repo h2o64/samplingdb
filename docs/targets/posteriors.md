@@ -31,10 +31,34 @@ and `r_i ~ Binomial(N_i, sigmoid(a_0 + a_1 x1_i + a_2 x2_i + a_12 x1_i x2_i + b_
 are `[a_0, a_1, a_2, a_12, b_1 .. b_21, log tau]`. The vague prior on `tau` makes `log tau` the neck
 of a funnel.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../figures/images/posteriors_seeds_dark.png">
+  <img alt="Seeds posterior in log tau and b_1 for the test and train splits, and the log tau marginal of both" src="../figures/images/posteriors_seeds_light.png">
+</picture>
+
+The reference density of `log tau` and the first random effect `b_1`, from 4096 test draws, with
+the marginals of 512 test and 512 train draws on its edges. A small `tau` lets every `b_i` spread
+out, which is the wide end of the funnel. The train chains, 500 MALA steps from `N(0, 2^2 I)`, end
+with `log tau` 1.36 reference standard deviations too low (`log_tau_mean_err`), so their `b_1`
+spreads too wide. The 512 test draws read 0.03.
+
 **Brownian.** `alpha_inn, alpha_obs ~ LogNormal(0, 2)`, `x_1 ~ N(0, alpha_inn)`,
 `x_i ~ N(x_{i-1}, alpha_inn)`, and `y_i ~ N(x_i, alpha_obs)` observed for `i` in 1..10 and 21..30.
 Coordinates are `[log alpha_inn, log alpha_obs, x_1 .. x_30]`. The two scales form the second
 funnel of the tier, and the middle ten steps are constrained only by the random walk.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../figures/images/posteriors_brownian_dark.png">
+  <img alt="Posterior bands of the Brownian path for the test and train splits over the 20 observations, and the joint of the two log scales" src="../figures/images/posteriors_brownian_light.png">
+</picture>
+
+The posterior of the path `x_t` (median, 50 % and 90 % bands) from 512 test and 512 train draws,
+with the 20 observations as dots and the ten unobserved steps shaded. On the right, the reference
+density of the two log scales from 4096 other test draws, with both splits in its marginals. The
+test bands widen over the gap, where only the random walk constrains the path. The train chains,
+500 MALA steps from `N(0, I)`, keep both scales too large, so their bands are wide everywhere. The
+three Brownian metrics read about 3 standard deviations for the train split and under 0.07 for the
+512 test draws.
 
 **LGCP.** `log N(x; mu, K) + sum_i [x_i c_i - a exp(x_i)]` with an exponential kernel
 `K = sigma^2 exp(-|m - n| / (40 beta))`, `sigma^2 = 1.91`, `beta = 1/33`,
@@ -43,6 +67,27 @@ Blessing et al. 2024. `LGCP(whitened=True)` samples `e` with `x = L e + mu`; it 
 geometry with its own name. Both have a Stan reference set, but the direct one needs a dense
 1600 x 1600 triangular solve per gradient: its run took 29 hours, against 30 minutes for the
 whitened one.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../figures/images/posteriors_lgcp_dark.png">
+  <img alt="Posterior mean intensity with the pine saplings on top, and posterior spread of the log intensity, for the test and train splits of the LGCP" src="../figures/images/posteriors_lgcp_light.png">
+</picture>
+
+The posterior mean of the intensity `exp(x)`, with the 126 saplings on top, and the posterior
+standard deviation of `x`, from 512 test and 512 train draws of `lgcp`, each quantity on one shared
+scale. The test split puts the intensity where the saplings cluster and is most certain there. The
+train chains start from the Gaussian prior and 500 MALA steps of size 0.0005 leave them close to
+it, so their field keeps the prior's flat mean and uniform spread. The two LGCP metrics read 6.79
+and 0.52 for the train split, against 0.80 and 0.002 for 512 other test draws.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../figures/images/posteriors_lgcp_draws_dark.gif">
+  <img alt="Thirty single test draws of the LGCP intensity field with the pine saplings on top" src="../figures/images/posteriors_lgcp_draws_light.gif">
+</picture>
+
+Thirty single test draws of the intensity field, on one logarithmic scale. Each draw is far rougher
+than the posterior mean: the kernel correlates cells over 40 beta = 1.2 cells, the structure
+`neighbour_correlation_err` measures.
 
 ## Metric panel
 
@@ -55,6 +100,19 @@ Every posterior reports moments relative to the reference spread:
 | `w1_first_coordinate` | 1D Wasserstein on coordinate 0 |
 
 `return_hist=True` gives the per-coordinate `mean`, `ref_mean`, `std` and `ref_std`.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../figures/images/posteriors_moments_dark.png">
+  <img alt="Per-coordinate mean and standard-deviation errors of the test and train splits on the four logistic regressions" src="../figures/images/posteriors_moments_light.png">
+</picture>
+
+What `return_hist=True` holds, drawn per coordinate for the four logistic regressions: the error of
+the posterior mean in reference standard deviations (left) and of the standard deviation (right).
+512 train draws and 512 test draws are scored against the same 4096 other test draws, so the test
+points are the floor the train split is read against. The ringed points are the coordinates the
+`max_*` metrics report. On the means the train split is two to five times its floor on ionosphere,
+sonar and breast-cancer and at its floor on german-credit; on the standard deviations it is at its
+floor on all four.
 
 Each posterior then adds the quantities it is judged on, because an average over coordinates hides
 the hard one:

@@ -13,6 +13,20 @@ Both potentials follow bgflow's `MultiDoubleWellPotential` and `LennardJonesPote
 generated the published data (Köhler et al. 2020, Klein et al. 2023). The general classes are
 `MultiDoubleWell` and `LennardJones`.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../figures/images/particles_configurations_dark.png">
+  <img alt="DW-4 configurations of the test and train splits, and LJ-13 and LJ-55 renders of each split" src="../figures/images/particles_configurations_light.png">
+</picture>
+
+Top: six DW-4 configurations of each split, each turned onto its principal axes, with the six pair
+distances drawn. Each pair sits near one of the two wells of the pair potential, at about 2.5 or 5.5.
+The first train state is the starting lattice, a square of side `d_0`. Bottom: one configuration of
+each split per cluster, at one scale, each particle shaded by its number of neighbours within
+`1.4 r`, the first minimum of the pair distribution. The test configuration has the median energy
+of the first 2048 test samples, and the train one is the last state of `train_samples(n=2048)`. At
+this temperature both clusters are liquid droplets, and after 2048 steps the LJ-55 train chain is
+still close to the cubic lattice it starts from.
+
 ## Conventions
 
 - **Pair multiplicity.** DW-4 counts each unordered pair once; the Lennard-Jones clusters count
@@ -42,12 +56,37 @@ The binning is DEM's: 200 bins over the reference distances' own range, and 100 
 `(-26, 0)` for DW-4, `(-60, 0)` for LJ-13 and `(-380, -180)` for LJ-55. See
 [Metrics](../metrics.md#binning).
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../figures/images/particles_histograms_dark.png">
+  <img alt="Pair-distance and energy histograms of the train and test splits of DW-4, LJ-13 and LJ-55, with the panel's numbers" src="../figures/images/particles_histograms_light.png">
+</picture>
+
+The panel of `train_samples(n=2048)` against the first 2048 test configurations, from
+`compute_metrics(train, ref_samples=test, return_hist=True)`. Inside the edges each curve is the
+panel's own histogram. The shaded bands lie outside the edges, where the panel drops mass without
+counting it in the total variation. `*_out_of_range` reports the dropped share of the scored samples,
+and the reference is cut the same way: 0.15% of the LJ-13 test energies lie below the -60 edge. The
+LJ-55 train chain still sits on its starting lattice, so its distances fall at the lattice spacings
+and its energies do not overlap the reference at all: `energy_total_var` reads its maximum of 1
+while `energy_out_of_range` reads 0.
+
 ## Splits
 
 | Split | How it is built |
 | --- | --- |
 | test | This library's non-reversible parallel tempering, `gen/parallel_tempering/generate.py`, published as `pt/<name>_<spec_id>.npy` and downloaded on first use. See [Reference sets](../reference-sets.md#parallel-tempering-particles-and-the-binary-glass). |
 | train | One Metropolis chain, burn-in included and nothing discarded, from a fixed lattice at the step size of Köhler et al. 2020 (0.5 for DW-4, 0.025 for Lennard-Jones), returned with the centre of mass removed like the test split. |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../figures/images/particles_train_chain_dark.gif">
+  <img alt="The LJ-55 train chain over 100 000 Metropolis steps, next to its energy and the test split's energies" src="../figures/images/particles_train_chain_light.gif">
+</picture>
+
+The LJ-55 train recipe run for the default 100 000 steps, shown at 100 evenly spaced states with
+particles shaded by neighbour count as above. `train_samples(n)` keeps the first `n` states of this
+one chain, so every train split is a prefix of it. The chain accepts 0.4% of its moves. Its energy
+falls from -262.8 on the lattice to -304.9 at the last step, which is still above 92.6% of the
+first 2048 test energies, and 63% of its states lie above the test split's 99th percentile.
 
 The test split is this library's own because the published DW-4 split of Klein et al. 2023 (in
 `jarridrb/DEM`) is not stationary under DW-4's own HMC kernel: its mean pair distance moves from
