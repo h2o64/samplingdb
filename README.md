@@ -2,6 +2,11 @@
 
 [![Reference sets on Hugging Face](https://huggingface.co/datasets/huggingface/badges/resolve/main/dataset-on-hf-sm.svg)](https://huggingface.co/datasets/h2o64/samplingdb)
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/images/banner_dark.png">
+  <img alt="Every target of the catalog, grouped by tier: synthetic densities, particle clusters, Bayesian posteriors, peptides and glass formers" src="docs/figures/images/banner_light.png">
+</picture>
+
 Unnormalised sampling targets for PyTorch. Each target has an analytic score, a cheap biased
 **train** split, an accurate **test** split, and a `compute_metrics` panel that scores samples,
 optionally weighted, against that test split.
