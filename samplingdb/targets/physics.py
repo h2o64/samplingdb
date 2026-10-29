@@ -45,11 +45,13 @@ class PeriodicPairMixture(Target):
     reference_folder = 'swapmc'
     spatial_dim = 2
     swap_channels = ()
-    train_recipe = 'basin-mc'
+    train_recipe = 'hot-basin-mc'
 
-    # Basins of the train recipe, and the largest share of the chains one gets over the smallest
+    # Basins of the train recipe, the largest share of the chains one gets over the smallest, and
+    # the power that packs the chains at the hot end of their ladder
     train_n_basins = 100
     train_skew = 10.0
+    train_ladder_power = 0.5
 
     def __init__(self, name, species, sigma, epsilon, density, temperature, cutoff_factor=2.5,
                  dtype=torch.float32):
@@ -294,28 +296,30 @@ class PeriodicPairMixture(Target):
 
     def generate_train_samples(self, n, seed=0, x0=None, n_chains=1000, n_basins=None,
                                basin_time_units=1500, n_time_units=100, thin=5, temperatures=None,
-                               p_swap=None):
-        """Runs the basin recipe: random displacements inside a few basins, in the wrong proportions
+                               basin_temperatures=None, ladder_power=None, p_swap=None):
+        """Runs the hot-basin recipe: displacements inside a few basins, most of them too hot
 
         n_basins chains start from the offset-row lattice of lattice_configuration, each with its
         own random assignment of the particles to the sites and a N(0, 0.05^2) jitter, and run
         basin_time_units of swap_monte_carlo: displacements of scale 0.065 and, with probability
         p_swap, swaps through this mixture's swap_channels, basin b at the target temperature
-        times a factor running geometrically over train_temperatures with b (temperature_ladder).
-        Each of the n_chains train chains then draws a basin, with shares geometric from 1 to
-        train_skew against those factors so that the coldest basin gets the most chains, and runs
-        displacements only, at its own factor of the same ladder over the chains: n_time_units
-        before keeping one configuration every thin time units until the chains hold n between
-        them. The split is those configurations frame by frame.
+        times a factor running geometrically over train_basin_temperatures with b
+        (temperature_ladder). Each of the n_chains train chains then draws a basin, with shares
+        geometric from 1 to train_skew against those factors so that the coldest basin gets the
+        most chains, and runs displacements only, at its own factor of train_temperatures, the
+        chains packed at the hot end by train_ladder_power: n_time_units before keeping one
+        configuration every thin time units until the chains hold n between them. The split is
+        those configurations frame by frame.
 
         Every frame therefore comes from random displacements inside one of a few basins, the
         literature's kernel for these glasses, while the swaps only make the basins: displacements
-        alone from a lattice never reach the test energies of the supercooled ternary. The energy
-        histogram spans the test one at both ends, through the cold basins and the hot chains. The
-        T = 1.0 ternary is a liquid and leaves its basins, so its split is a liquid at the wrong
-        temperatures. The binary takes no swaps, which do not help it, and colder chains instead,
-        from offset rows, which suit its hexagonal A crystal. The recipe takes about half a minute
-        on a GPU and minutes on the CPU.
+        alone from a lattice never reach the test energies of the supercooled ternary. The bulk of
+        the train energies lies above the test ones; the few cold chains, in the deepest basins,
+        carry its low tail across them and just past their lowest. The T = 1.0 ternary is a liquid
+        and leaves its basins, so its split is a liquid at the wrong temperatures. The binary
+        takes no swaps, which do not help it, and colder chains instead, from offset rows, which
+        suit its hexagonal A crystal. The recipe takes about half a minute on a GPU and minutes on
+        the CPU.
 
         Args:
             * n (int): Number of samples
@@ -329,8 +333,12 @@ class PeriodicPairMixture(Target):
             * n_time_units (int): Time units of displacements before any configuration is kept
                 (default is 100)
             * thin (int): Time units between kept configurations (default is 5)
-            * temperatures (tuple of two floats or None): Lowest and highest temperature factor;
-                None uses train_temperatures (default is None)
+            * temperatures (tuple of two floats or None): Lowest and highest temperature factor
+                of the chains; None uses train_temperatures (default is None)
+            * basin_temperatures (tuple of two floats or None): Lowest and highest temperature
+                factor of the basins; None uses train_basin_temperatures (default is None)
+            * ladder_power (float or None): Power of the chains' ladder, below 1 packing them at
+                the hot end; None uses train_ladder_power (default is None)
             * p_swap (float or None): Probability of a swap move in the basin phase; None uses
                 train_p_swap (default is None)
 
@@ -341,6 +349,10 @@ class PeriodicPairMixture(Target):
         n_chains, n_frames = chain_layout(n, n_chains)
         if temperatures is None:
             temperatures = self.train_temperatures
+        if basin_temperatures is None:
+            basin_temperatures = self.train_basin_temperatures
+        if ladder_power is None:
+            ladder_power = self.train_ladder_power
         compile = self.device.type == 'cuda'
         run = lambda x, time_units, factors, **kwargs: swap_monte_carlo(
             self, self.positions(x), time_units, temperatures=factors, generator=gen,
@@ -351,7 +363,7 @@ class PeriodicPairMixture(Target):
             n_basins = n_basins or self.train_n_basins
             x0 = self.lattice_configuration(n_basins, jitter=0.05, offset=True, shuffle=True,
                                             generator=gen)
-            factors = temperature_ladder(n_basins, temperatures, dtype=self.dtype,
+            factors = temperature_ladder(n_basins, basin_temperatures, dtype=self.dtype,
                                          device=self.device)
             p_swap = self.train_p_swap if p_swap is None else p_swap
             basins = run(self.cast(x0).reshape(n_basins, -1), basin_time_units, factors,
@@ -362,7 +374,8 @@ class PeriodicPairMixture(Target):
             x = cycle(self.cast(x0).reshape(-1, self.dim), n_chains)
 
         # Displacements only, at the chains' own temperatures
-        factors = temperature_ladder(n_chains, temperatures, dtype=self.dtype, device=self.device)
+        factors = temperature_ladder(n_chains, temperatures, dtype=self.dtype, device=self.device,
+                                     power=ladder_power)
         x = run(x, n_time_units, factors)
         trace = run(x, n_frames * thin, factors, return_trace=True, thin=thin)
         return interleave(trace, n)
@@ -491,9 +504,11 @@ class KobAndersen2D(PeriodicPairMixture):
     swap_channels = ((0, 2), (1, 2))
 
     # The train basins are made with this mixture's own swaps, at ParticlesMC's rate, and
-    # temperature factors either side of 1
+    # temperature factors either side of 1; the chains run far hotter, and the coldest of them
+    # colder than any basin, to carry the low tail past the test energies
     train_p_swap = 0.2
-    train_temperatures = (0.8, 1.25)
+    train_basin_temperatures = (0.8, 1.25)
+    train_temperatures = (0.6, 4.0)
 
     # The smoothing triple the released data was generated with, at the cutoff it belongs to
     PINNED_SMOOTHING = {2.5: (0.04049023795, -0.00970155098, 0.00062012616)}
@@ -609,7 +624,8 @@ class KobAndersenBinary(PeriodicPairMixture):
     # alone at the target temperature leave the crystalline low end uncovered, while the cold
     # chains shed their thermal energy fast
     train_p_swap = 0.0
-    train_temperatures = (0.25, 1.25)
+    train_basin_temperatures = (0.25, 1.25)
+    train_temperatures = (0.15, 4.0)
 
     def __init__(self, temperature=0.2, n_particles=64, density=1.0, dtype=torch.float32):
         """Builds the binary Kob-Andersen mixture

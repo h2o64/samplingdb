@@ -69,11 +69,13 @@ class ParticleTarget(Target):
     truth_tier = 1
     reference_folder = 'pt'
 
-    train_recipe = 'tempered-mala'
+    train_recipe = 'hot-mala'
 
-    # Lowest and highest temperature factor of the train chains, whose spread carries the train
-    # energies past both ends of the test ones
-    train_temperatures = (0.8, 1.25)
+    # Lowest and highest temperature factor of the train chains, and the power that packs them at
+    # the hot end: the bulk of the train energies sits above the test ones, and the thin run of
+    # colder chains carries its low tail across them, just past their lowest
+    train_temperatures = (0.8, 3.0)
+    train_ladder_power = 0.5
 
     # How many times the energy counts each unordered pair. DW-4 counts each once (bgflow's
     # compute_distances(remove_duplicates=True)); the Lennard-Jones systems count each TWICE,
@@ -225,20 +227,20 @@ class ParticleTarget(Target):
         return self.preprocess(x)
 
     def generate_train_samples(self, n, seed=0, x0=None, n_chains=1000, n_steps=1000, thin=10,
-                               temperatures=None):
-        """Runs the tempered-chains recipe: the whole energy range, at the wrong temperatures
+                               temperatures=None, ladder_power=None):
+        """Runs the hot-chains recipe: most chains too hot, a few reaching the lowest test energies
 
         n_chains chains start from the fixed lattice configuration (initial_configuration)
         jittered by N(0, 0.1^2) per coordinate. Chain i samples exp(log_prob / factor_i), the
-        factors running geometrically over train_temperatures with the chain index
-        (temperature_ladder). Each takes n_steps MALA moves whose step size adapts per chain
-        towards 57% acceptance, then keeps one state every thin moves until the chains hold n
-        between them (tempered_mala). The split is those states frame by frame, centred.
+        factors running over train_temperatures with the chain index (temperature_ladder), packed
+        at the hot end by train_ladder_power. Each takes n_steps MALA moves whose step size adapts
+        per chain towards 57% acceptance, then keeps one state every thin moves until the chains
+        hold n between them (tempered_mala). The split is those states frame by frame, centred.
 
-        The adaptive moves relax the energy of every chain at its own temperature, so the energy
-        histogram is the test one widened: the cold chains reach past its low end and the hot ones
-        past its high end. The proportions of the bound and unbound pairs, or of the isomers, are
-        those of the mixture of temperatures. The recipe takes seconds on a GPU.
+        The adaptive moves relax the energy of every chain at its own temperature, so the bulk of
+        the train energies lies above the test ones, and only the tail of the colder chains
+        overlaps them, reaching just past their lowest. The proportions of the bound and unbound
+        pairs, or of the isomers, are those of the hot chains. The recipe takes seconds on a GPU.
 
         Args:
             * n (int): Number of samples
@@ -251,6 +253,8 @@ class ParticleTarget(Target):
             * thin (int): Moves between kept states (default is 10)
             * temperatures (tuple of two floats or None): Lowest and highest temperature factor;
                 None uses train_temperatures (default is None)
+            * ladder_power (float or None): Power of the ladder, below 1 packing the chains at
+                the hot end; None uses train_ladder_power (default is None)
 
         Returns:
             * x (torch.Tensor of shape (n, dim)): The biased samples, mean-free
@@ -262,7 +266,10 @@ class ParticleTarget(Target):
                 n_chains, self.dim, generator=gen, dtype=self.dtype, device=self.device)
         if temperatures is None:
             temperatures = self.train_temperatures
-        factors = temperature_ladder(n_chains, temperatures, dtype=self.dtype, device=self.device)
+        if ladder_power is None:
+            ladder_power = self.train_ladder_power
+        factors = temperature_ladder(n_chains, temperatures, dtype=self.dtype, device=self.device,
+                                     power=ladder_power)
         trace = tempered_mala(self.log_prob, self.score, cycle(self.cast(x0), n_chains), factors,
                               n_steps, n_frames, thin, generator=gen)
         return self.preprocess(interleave(trace, n))
@@ -321,6 +328,10 @@ class MultiDoubleWell(ParticleTarget):
     """
 
     energy_histogram_range = (-26.0, 0.0)
+
+    # The energy barely moves with the temperature against its floor at the bound pairs, so the
+    # train ladder reaches further both ways: far hotter to move the bulk, colder to hold the floor
+    train_temperatures = (0.5, 20.0)
 
     def __init__(self, n_particles=4, spatial_dim=2, a=0.9, b=-4.0, c=0.0, offset=4.0, tau=1.0,
                  name='dw4', prior_scale=2.0, dtype=torch.float32):

@@ -242,24 +242,26 @@ def per_chain_step_size(step_size, x0):
     return step_size.expand(len(x0), 1).clone() if step_size.dim() < 2 else step_size.clone()
 
 
-def temperature_ladder(n_chains, temperatures, dtype=torch.float64, device=None):
+def temperature_ladder(n_chains, temperatures, dtype=torch.float64, device=None, power=1.0):
     """Returns one temperature factor per chain, geometric in the chain index
 
-    Chain i of n runs at low * (high / low) ** (i / (n - 1)), so the ladder is fixed by the chain
-    count alone: a chain restarted at the same index runs at the same temperature, and any prefix
-    of an interleaved trace holds every temperature.
+    Chain i of n runs at low * (high / low) ** ((i / (n - 1)) ** power), so the ladder is fixed by
+    the chain count alone: a chain restarted at the same index runs at the same temperature, and
+    any prefix of an interleaved trace holds every temperature. A power below 1 packs the chains at
+    the hot end and leaves a thin run of colder ones down to the low end.
 
     Args:
         * n_chains (int): Number of chains
         * temperatures (tuple of two floats): Lowest and highest factor, (low, high)
         * dtype (torch.dtype): Output dtype (default is torch.float64)
         * device (torch.device or None): Output device (default is None)
+        * power (float): Exponent of the position along the ladder (default is 1.0)
 
     Returns:
         * factors (torch.Tensor of shape (n_chains,)): Temperature factors
     """
     low, high = temperatures
-    position = torch.linspace(0.0, 1.0, n_chains, dtype=dtype, device=device)
+    position = torch.linspace(0.0, 1.0, n_chains, dtype=dtype, device=device) ** power
     return low * (high / low) ** position
 
 

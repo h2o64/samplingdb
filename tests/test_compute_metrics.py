@@ -184,8 +184,8 @@ def test_particle_panel_binning():
 def test_particle_panel_reports_dropped_mass():
     """Samples outside the reference range are reported rather than silently renormalised"""
     target = LJ13()
-    ref_samples = target.train_samples(n=2048)[1024:]
-    diffuse = 5.0 * ref_samples
+    ref_samples = target.generate_train_samples(1024, n_chains=64, temperatures=(1.0, 1.0))
+    diffuse = 3.0 * ref_samples
     ret = target.compute_metrics(diffuse, ref_samples=ref_samples, compute_standard_metrics=False)
     assert ret['dist_out_of_range'] > 0.5
     assert ret['energy_out_of_range'] > 0.5
