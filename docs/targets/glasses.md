@@ -24,11 +24,12 @@ One configuration of each split for every catalogued system, each particle a dis
 `sigma_ii`; on the ternary, the one closest to its split's median energy per particle. The train
 split's basins are a hundred Monte Carlo runs from a lattice with the particles shuffled over its
 sites, with swaps on the ternary, at temperatures on both sides of the target's; chains of
-displacement moves started in them, most in the coldest, give its configurations. The species are
+displacement moves started in them, most in the coldest and most of them run far hotter than the
+target, give its configurations. The species are
 mixed in both splits, so the ternary columns look alike and the difference is in the panel below.
 The last column shades the binary by its local hexatic order `|psi_6|`, on a configuration of each
 split typical in the crystalline order of A. In both, A crystallises away from the B particles; a
-median of 39% of the A particles have `|psi_6| > 0.8` in the train split, against 51% in the test
+median of 35% of the A particles have `|psi_6| > 0.8` in the train split, against 51% in the test
 split.
 
 ## Conventions
@@ -74,10 +75,10 @@ The panel on the 100 000-configuration train split against one half of the test 
 its floor, the other half scored against the same. The vertical line marks where
 `|g(r) - g_ref(r)|` peaks, the value `rdf_max_abs_err` reports. The shaded span is the panel's
 energy edges, from the reference; train energies outside it are dropped from `energy_total_var` and
-counted by `energy_out_of_range`. On all three systems the train energies reach past the test ones
-at both ends. On the ternary the two g(r) nearly coincide. On the binary the train split has fewer
-A-B contacts, the first peak, and `rdf_max_abs_err` reads 0.59 against a floor of 0.01; 9.7% of
-its energies fall outside the edges.
+counted by `energy_out_of_range`. On all three systems most of the train energies lie above the
+test ones, more than half of them past the edges, and only the tail of the cold chains overlaps the
+test histogram, reaching just past its lowest energy. The hot chains also lower and widen every
+peak of g(r): `rdf_max_abs_err` reads 0.60, 0.69 and 0.80 against floors of 0.01.
 
 ## Splits
 
@@ -85,7 +86,7 @@ its energies fall outside the edges.
 | --- | --- |
 | test, ternary | This library's swap Monte Carlo, `gen/swap_mc/generate.py`, published as `swapmc/<name>_<spec_id>.npy` and downloaded on first use. See [Reference sets](../reference-sets.md#swap-monte-carlo-the-ternary-glass). |
 | test, binary | This library's non-reversible parallel tempering, `gen/parallel_tempering/generate.py`, published as `pt/<name>_<spec_id>.npy` and downloaded on first use: 30 720 configurations at T = 0.2, 91% independent (see [Reference sets](../reference-sets.md#parallel-tempering-particles-and-the-binary-glass)). Cheng et al. 2026 published no configurations. |
-| train | Random displacements inside 100 basins. Each basin is a single-particle Monte Carlo chain run for 1500 time units (one time unit is `N` attempted moves), with `N(0, 0.065^2)` displacements and, on the ternary, swaps with probability 0.2. It starts from a lattice with every second row offset by half a spacing and the particles assigned to its sites at random, and runs at the target temperature times a factor running geometrically from 0.8 to 1.25 on the ternary and from 0.25 to 1.25 on the binary, whose cold chains reach its crystalline low end. Each of 1000 chains then starts from a basin, with shares from 1 to 10 that favour the coldest, and runs displacements only, at its own factor of the same range: 100 time units, then one configuration every 5. At T = 0.32 and on the binary the chains stay in their basins. Every test energy lies inside the train range. |
+| train | Random displacements inside 100 basins. Each basin is a single-particle Monte Carlo chain run for 1500 time units (one time unit is `N` attempted moves), with `N(0, 0.065^2)` displacements and, on the ternary, swaps with probability 0.2. It starts from a lattice with every second row offset by half a spacing and the particles assigned to its sites at random, and runs at the target temperature times a factor running geometrically from 0.8 to 1.25 on the ternary and from 0.25 to 1.25 on the binary, whose cold chains reach its crystalline low end. Each of 1000 chains then starts from a basin, with shares from 1 to 10 that favour the coldest, and runs displacements only at its own factor `low (high / low)^((i / 999)^0.5)`, from 0.6 to 4 on the ternary and from 0.15 to 4 on the binary: most chains run far hotter than the target, a thin run of colder ones stays in the deepest basins. 100 time units, then one configuration every 5. The bulk of the train energies lies above the test ones, and only the tail of the cold chains overlaps them, reaching just past their lowest. |
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../figures/images/glasses_swap_dark.gif">
@@ -99,5 +100,5 @@ only until t = 2100, where the train split ends. The other takes displacements o
 one chain of each, the curves the mean energy per particle against the central 90% of the test
 split's energies. With swaps the mean enters that band at t = 530 and reads -2.60 when the split
 ends; with displacements only it reads -2.46 after 10 000 time units, above the band's top at
--2.54. The recipe itself spreads its basins and chains over temperatures on both sides of the
-target's.
+-2.54. The recipe itself makes its basins at temperatures on both sides of the target's and runs
+most of its chains far hotter.
