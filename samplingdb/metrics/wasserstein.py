@@ -53,13 +53,9 @@ def euclidean_cost(x0, x1, power=2):
     """
     assert power in [1, 2]
 
-    # float64 whatever comes in. torch.cdist expands |x|^2 + |y|^2 - 2 x.y, which cancels
-    # catastrophically for near-identical points, and a metric's floor is exactly where both sides
-    # ARE near-identical. Measured on GMM40 with 256 samples: W(x, x) is 1.8e-07 from float64
-    # samples, 3.9e-03 from float32 ones -- four orders of magnitude of lost resolution, right where
-    # the panel needs it -- and 0.0 from float32 samples promoted here. So this is not a reason to
-    # sample in float64: it is a reason for the metric to promote. The panel runs once over a
-    # reference set; the force field runs 1e9 times, which is where the precision has to be bought.
+    # float64 whatever comes in: torch.cdist expands |x|^2 + |y|^2 - 2 x.y, which cancels
+    # catastrophically for the near-identical points that set a metric's floor, so float32 samples
+    # are promoted here
     exact = torch.float64
     cost = torch.cdist(x0.reshape(len(x0), -1).detach().to(exact),
                        x1.reshape(len(x1), -1).detach().to(exact))
@@ -156,9 +152,7 @@ def wasserstein_distance_1d(u_values, v_values, u_weights=None, v_weights=None, 
     Both quantile functions are step functions that only change at the pooled cumulative-weight
     levels, so the transport cost is the exact sum of |F_u^-1 - F_v^-1|^power over those segments.
     This is POT's emd2_1d without leaving the device, and it agrees with scipy to 1e-12 for
-    power=1. Interpolating the CDFs linearly and pairing each interval with the CDF value at its
-    far end instead carries an O(1/n) bias -- 0.5745 against the exact 0.5707 on 500 versus 400
-    standard normal draws.
+    power=1. It is exact where a linear interpolation of the CDFs carries an O(1/n) bias.
 
     Args:
         * u_values (torch.Tensor of shape (n,)): Samples from the first distribution
@@ -209,9 +203,8 @@ def circular_wasserstein_1d(u_values, v_values, u_weights=None, v_weights=None,
     On the circle the transport cost is the minimum over a rotation c of the integral of
     |F_u - F_v - c|, which the median of F_u - F_v attains (Rabin, Delon and Gousseau 2011). Both
     CDFs are step functions, so the integral is an exact sum over the pooled sample points. A
-    linear W1 on angles instead treats -pi and pi as the two ends of a segment: a backbone omega
-    torsion sits on that cut, and two halves of one ensemble then read ~0.05 rad apart instead of
-    ~0.006.
+    linear W1 on angles treats -pi and pi as the two ends of a segment, which inflates the
+    distance of a torsion that sits on that cut, such as a backbone omega.
 
     Args:
         * u_values (torch.Tensor of shape (n,)): Angles of the first distribution, in radians

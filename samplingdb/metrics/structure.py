@@ -13,10 +13,10 @@ def compute_structure_metrics(distances, ref_distances, energy, ref_energy, weig
 
     The three structured families -- particle clusters, glass formers and peptides -- are all
     read on the same two observables, so the panel is written once here and each target supplies
-    only what is genuinely its own: the distance edges (derived from the reference set, or pinned
-    by a periodic box), the energy range, and its own normalisation of the energy. A target whose
-    energy is per particle or per atom passes it that way and says so;
-    the key is 'energy_w1' either way, so one name means one quantity across the corpus.
+    only what is its own: the distance edges (derived from the reference set, or pinned by a
+    periodic box), the energy range, and its own normalisation of the energy. A target whose
+    energy is per particle or per atom passes it that way and says so; the key is 'energy_w1'
+    either way, so one name means one quantity across the corpus.
 
     WARNING: whichever edges the caller passes decide whether mass can fall outside them, and
     'dist_out_of_range' / 'energy_out_of_range' are the numbers that say whether it did. A TVD

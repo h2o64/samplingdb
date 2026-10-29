@@ -44,9 +44,8 @@ def integrated_autocorrelation_time(series, c=5.0):
     standard automatic choice.
 
     WARNING: tau is only estimable from a series many times longer than itself. On a shorter one
-    the sum runs over a window the series' own length cuts off, so the estimator reads LOW: on an
-    AR(1) whose true tau is 39, averaged over ten runs of 64 chains, it reads 21.2 at 32 steps,
-    36.2 at 100, 36.5 at 400 and 39.2 at 2000. A short chain therefore looks better than it is.
+    the series' own length cuts the window off, so the estimator reads low and a short chain looks
+    better than it is.
 
     Args:
         * series (torch.Tensor of shape (n_chains, n_steps)): One scalar observable per chain
@@ -70,24 +69,17 @@ def chain_mean_dispersion(observables):
 
         tau_implied = n * Var(chain mean) / Var(state)
 
-    is 1 for an independent set and grows with the correlation. It is worth having next to
-    integrated_autocorrelation_time because it estimates the same quantity a completely different
-    way -- from the spread of the chain means rather than from the lag structure -- with no
-    truncation rule and no Sokal window to choose. When the two agree, the number is not an
-    artefact of that choice. On LJ-55 at 128 chains and 64 stored states each, the chain means have
-    sd 1.611 against the 13.557 / 8 = 1.695 independence predicts, i.e. tau_implied 0.90, next to
-    an ACF reading of 1.00.
+    is 1 for an independent set and grows with the correlation. It estimates the same quantity as
+    integrated_autocorrelation_time from the spread of the chain means instead of the lag
+    structure, with no truncation rule and no Sokal window to choose, so where the two agree the
+    number does not depend on that choice.
 
-    WARNING: it does NOT see further than the ACF does. Both are bounded by the chain length and
-    both read LOW on a short series, by about the same amount: on an AR(1) whose true tau is 39,
-    averaged over ten runs of 64 chains, the two give 21.2 / 19.8 at 32 steps, 36.2 / 32.5 at 100
-    and 36.5 / 36.6 at 400. Neither can tell a handful of stuck chains from a long correlation
-    time either -- both report ~73 for one frozen chain in 64. What this buys is an independent
-    estimate, not a longer reach.
+    WARNING: it is bounded by the chain length like the ACF, and reads low on a short series by
+    about as much. Neither estimate tells a few stuck chains from a long correlation time.
 
     WARNING: Var(chain mean) is itself estimated from n_chains numbers, so this has a relative
-    error of about sqrt(2 / n_chains) -- 12% at 128 chains and 45% at 10. It is a cross-check, not
-    a replacement.
+    error of about sqrt(2 / n_chains), 12% at 128 chains and 45% at 10. Use it as a cross-check of
+    integrated_autocorrelation_time.
 
     Args:
         * observables (dict): Name -> torch.Tensor of shape (n_chains, n_steps)

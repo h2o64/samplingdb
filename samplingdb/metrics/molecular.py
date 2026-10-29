@@ -25,12 +25,11 @@ def wrap_angles(angles):
 def kmeans(features, n_clusters=20, n_steps=100, seed=0):
     """Fits k-means on device, with a seeded k-means++ initialisation
 
-    NOTE: this is Lloyd's algorithm in torch rather than a call into scikit-learn, so a cluster
-    assignment is not bit-identical to upstream's, and the divergence built on it carries the
-    initialisation noise every k-means metric has: on AAAAAA's TICA plane, eight seeds of this
-    give 0.0662 to 0.0820 and eight random_states of scikit-learn give 0.0705 to 0.0825, the two
-    ranges overlapping and both an order of magnitude above the 0.008 reference-versus-itself
-    floor. The centres are returned so a caller can reuse exactly the ones a reference produced.
+    NOTE: this is Lloyd's algorithm in torch, where upstream calls scikit-learn, so a cluster
+    assignment is not bit-identical to upstream's. The divergence built on it carries the
+    initialisation noise every k-means metric has, and its spread over seeds matches
+    scikit-learn's over random_state. The centres are returned so a caller can reuse exactly the
+    ones a reference produced.
 
     NOTE: features holding fewer distinct points than n_clusters get one centre per distinct
     point, so fewer than n_clusters centres come back.
@@ -139,13 +138,11 @@ def fit_tica(features, lagtime=100, dim=2):
     """Fits a Koopman-reweighted TICA model, then keeps only its projection
 
     NOTE: deeptime does the fit, exactly as upstream does (TICA with a KoopmanWeightingEstimator
-    at the same lagtime), because reproducing Koopman reweighting by hand would be a second
-    implementation of somebody else's estimator. It is a one-off on time-ordered reference data
-    and the only place a non-torch dependency enters this module, which is why it ships in the
-    [molecular] extra and is imported lazily here.
+    at the same lagtime). It is a one-off on time-ordered reference data and the only non-torch
+    dependency of this module, so it ships in the [molecular] extra and is imported lazily here.
 
     WARNING: the features must be in TRAJECTORY ORDER. TICA is defined through a time-lagged
-    covariance, so a shuffled reference set silently gives a meaningless projection.
+    covariance, so a shuffled reference set gives a meaningless projection, with no error.
 
     Args:
         * features (torch.Tensor of shape (n, n_features)): Time-ordered features

@@ -17,13 +17,11 @@ from manifest import manifest
 # allowed to grow (Stan's guidance: raise delta towards 0.9-0.95 for difficult geometry, and raise
 # max_depth when the tree saturates). LGCP is 1600 dense dimensions, so it gets more chains.
 #
-# thin is what makes 100 000 stored draws worth ~100 000. At 10 000 unthinned draws (2026-10-09)
-# the worst ESS_bulk was 9776-10402 for the four logistic regressions, 970 for Seeds and 1224 of
-# 2000 for LGCP, i.e. tau ~1, ~10 and ~1.6 draws; thin is about three times that, because thinning
-# a fat-tailed autocorrelation does not divide tau by the factor.
+# thin makes 100 000 stored draws worth about as many independent ones (the MIN_EFFICIENCY gate
+# below). Where the unthinned draws are correlated, it is about three times their autocorrelation
+# time, because thinning a fat-tailed autocorrelation does not divide tau by the factor.
 #
-# Brownian is not here: its posterior factorises, so gen/exact/brownian.py draws it exactly. Stan
-# under-sampled the tail of its observation scale with no diagnostic noticing.
+# Brownian is not here: its posterior factorises, so gen/exact/brownian.py draws it exactly.
 SETTINGS = {
     'logistic': {'adapt_delta': 0.8, 'max_treedepth': 10, 'chains': 4, 'warmup': 1000,
                  'thin': 1},
@@ -91,9 +89,8 @@ def check_log_prob(model, data, target, n=8):
     jacobian=False is correct here because the models declare their parameters unconstrained and
     add every Jacobian by hand, exactly as the torch targets do.
 
-    NOTE: sig_figs=18 is load-bearing. Stan returns log_prob through a text file, and at the
-    default 6 significant figures the round-trip error is ~4e-4 on a density of magnitude 400 --
-    enough to look like a modelling difference. At 18 the two agree to 6e-14.
+    NOTE: Stan returns log_prob through a text file, so sig_figs=18 is needed: at the default 6
+    significant figures the rounding error is far above the 1e-9 the check asserts.
 
     Args:
         * model (CmdStanModel): The compiled model
@@ -138,12 +135,9 @@ def unflatten(target, row, names):
 def flatten(draws, names, seed=0):
     """Concatenates Stan's per-parameter draws into samplingdb's coordinate order, then shuffles
 
-    NOTE: the shuffle is load-bearing. cmdstanpy returns draws chain-blocked, so the first quarter
-    of the array is chain 1 -- and every consumer of test_samples(n=...) would silently get the
-    leading draws of one chain, which for a coordinate that mixes slowly is not a posterior sample
-    at all. Two contiguous halves of a chain-blocked Brownian array disagreed by 44% on one
-    coordinate's standard deviation, against 4% once permuted. The permutation is seeded, so the
-    reference set stays reproducible.
+    NOTE: cmdstanpy returns draws chain-blocked, so without the shuffle the first quarter of the
+    array is chain 1 and test_samples(n=...) would return the leading draws of one chain. The
+    permutation is seeded, so the reference set stays reproducible.
 
     Args:
         * draws (CmdStanMCMC): The fit

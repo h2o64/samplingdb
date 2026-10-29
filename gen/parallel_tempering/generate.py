@@ -12,81 +12,27 @@ from diagnostics import chain_mean_dispersion, effective_sample_size
 from manifest import manifest
 from nrpt import hmc_explorer, linear_schedule, non_reversible_parallel_tempering
 
-# Per-target ladder and budget. beta_min is chosen so the hot rung is a liquid or a gas: the
-# particle clusters melt well below their own energy scale, and the binary glass is a liquid at
-# T = 2.0, which is beta = 0.1 of its T = 0.2 target.
+# Per-target ladder and budget. beta_min puts the hot level in a liquid or a gas, where the
+# particles mix. n_local and thin come from a calibration run (--calibrate, then
+# gen/audit/decorrelation.py on a finished set). Where the observed round-trip rate is far below
+# 1 / (2 + 2 Lambda), the local kernel is the bottleneck and n_local is raised. Thinning a
+# fat-tailed autocorrelation does not divide tau by the thinning factor, so thin is found by
+# iterating the audit.
 #
-# n_local and thin are MEASURED, not guessed, and the measurement is what the barrier makes
-# possible. Diagnosed at 32 chains over 512 collection scans (gen/audit/decorrelation.py reads
-# the same quantities off a finished set):
-#
-# | target        | Lambda | rungs it asks for | rate / the cap Lambda allows | tau, scans |
-# | ---           | ---    | ---               | ---                          | ---        |
-# | dw4           | 1.67   | 4                 | 85%                          | 4.6        |
-# | lj13          | 6.79   | 14                | 4% at n_local 2, 47% at 32   | 5.7 -> 1.2 |
-# | ka-binary-2.0 | 2.27   | 5                 | 62%                          | 3.2        |
-# | ka-binary-0.5 | 5.80   | 12                | 29%                          | ~106       |
-# | ka-binary-0.2 | 8.69   | 18                | 8% at n_local 2, 13% at 8    | ~88        |
-# | lj55          | 13.81  | 28                | 0% at 24 rungs               | ~8.5       |
-#
-# dw4 is the one carried all the way through: 12 rungs, n_local 2, thin 16, 14 rounds gives
-# 102 400 states whose worst tau is 1.06, i.e. 94% of them independent, in two minutes. The
-# thinning was found by iterating the audit rather than predicted -- thin 5 leaves 65%, 8 leaves
-# 81%, 16 leaves 94%, because the autocorrelation has a fat tail and thinning does not simply
-# divide tau by the thinning factor.
-#
-# Two readings matter. Where the observed round-trip rate is far below 1 / (2 + 2 Lambda), the
-# LOCAL kernel is the bottleneck and not the ladder, and buying more of it pays: lj13 goes from 4%
-# to 47% of the cap for 16x the work per scan, and its stored autocorrelation falls from 5.7 scans
-# to 1.2. Where it does not pay, that is worth knowing too -- ka-binary at T = 0.2 gains only 1.5x
-# in rate for 4x the work, because a supercooled glass relaxes by structural rearrangement that
-# more Hamiltonian trajectory does not accelerate.
-#
-# WARNING: the two ~ values are not trustworthy. An autocorrelation time is only estimable from a
-# series many times longer than itself, and 512 stored scans against tau ~ 100 is six times its
-# own length. They are recorded as a lower bound and a warning, not as a thin to rely on.
-#
-# ka-binary-N64-T0.2 gets a short ladder from T = 0.6 rather than one reaching T = 2. Its structure
-# relaxes in ~5 000 HMC moves at T = 0.5 and ~25 000 at 0.4 and freezes below 0.3, with no latent
-# heat between 0.2 and 1.0. At equal cost (1.23e10 gradient evaluations, 128 ladders, half started
-# from the deepest states found earlier and half from a T = 0.6 melt), 10 geometric levels from
-# T = 0.6 bring both halves to E/N -3.2142 against -3.2141 within ~300 000 scans, while 20 levels from
-# T = 2.0 leave them -3.2137 against -3.2119: the long ladder spends half its barrier (Lambda 9.1
-# against 4.6) on a liquid that never holds a configuration long enough to melt it. On 720 000
-# equilibrated scans per ladder the merged set reaches 77% efficiency at a 164k-scan spacing and
-# a fit puts 90% at ~300k-350k, limited by the median and mean pair distance; gen/merge_shards.py
-# picks the spacing, so store densely. That ladder is geometric in T and was frozen without any
-# schedule adaptation, its swap rejections landing at 0.49-0.55 on their own, so the calibration
-# keeps it and tunes the step sizes only.
+# ka-binary-N64-T0.2 runs 10 levels geometric in T from T = 0.6, where its structure relaxes in a
+# few thousand HMC moves, down to its T = 0.2 target; a ladder reaching higher spends its barrier
+# on a liquid. The ladder is kept as given and only the step sizes are tuned. Independent states
+# are ~3e5 scans apart, so the shards store densely and gen/merge_shards.py picks the spacing.
 SETTINGS = {
     'dw4': {'target': lambda: DW4(), 'n_rungs': 12, 'beta_min': 0.1, 'step_size': 0.05,
             'n_local': 2, 'thin': 16},
     'lj13': {'target': lambda: LJ13(), 'n_rungs': 16, 'beta_min': 0.1, 'step_size': 0.01,
              'n_local': 32, 'thin': 2},
-    # beta_min 0.5 rather than 0.1. The barrier profile (gen/audit/barrier.py) shows LJ-55's
-    # barrier is not a bottleneck anywhere: lambda(beta) falls MONOTONICALLY from 90 at
-    # beta = 0.02 to 7.5 at beta = 1, with no spike, so there is nothing to cross and 72% of
-    # Lambda simply sits below beta = 0.5 -- where E is POSITIVE and the cluster is a dilute gas
-    # held only by its own oscillator, which is not a state the target needs to visit.
-    #
-    # It does not need to visit a melt either, because the target is already molten. Under this
-    # convention the pair sum is doubled, so beta = 1 is T* = 0.5 against a published melting
-    # point of 0.294 for LJ-55, and independently of that number the corpus's own measurement
-    # says the same thing: a LABELLED pair distance decorrelates in tau = 63 scans here, which it
-    # can only do if particles exchange neighbours. Measured at 32 chains over 512 scans:
-    #
-    # | beta_min | rungs | Lambda | round trips / cap | min | tau | wall clock |
-    # | ---      | ---   | ---    | ---               | --- | --- | ---        |
-    # | 0.1      | 28    | 14.59  | 0%                | 0   | 1.13 | 595 s     |
-    # | 0.3      | 16    | 8.65   | 8%                | 0   | 1.20 | 507 s     |
-    # | 0.5      | 12    | 5.15   | 38%               | 11  | 1.20 | 319 s     |
-    # | 0.7      | 8     | 2.67   | 56%               | 30  | 1.13 | 264 s     |
-    #
-    # The cold rung is the SAME ensemble in all four, E = -325.3 +- 14.0 against a released -323,
-    # so this buys round trips and costs nothing. 0.5 rather than 0.7 because 0.7 is a hot end
-    # only 1.4x the target temperature, which is barely tempering at all and leaves no insurance
-    # against a mode the observables do not see; 0.5 is 2x the target and still clears the gate
-    # with room.
+    # beta_min 0.5. Under the doubled pair sum beta = 1 is T* = 0.5, above LJ-55's melting point,
+    # so the target is already a liquid and the hot end needs no melt. Below beta = 0.5 the
+    # cluster is a dilute gas held by its own oscillator, which carries most of the barrier and no
+    # state the target needs. A hot end at twice the target temperature keeps some insurance
+    # against a mode the observables do not see.
     'lj55': {'target': lambda: LJ55(), 'n_rungs': 12, 'beta_min': 0.5, 'step_size': 0.005,
              'n_local': 8, 'thin': 8},
     'ka-binary-N64-T0.2': {'target': lambda: KobAndersenBinary(temperature=0.2, n_particles=64),
@@ -135,9 +81,8 @@ config = vars(args)
 # Print the config
 pprint.pprint(config)
 
-# Build the target and its ladder. The schedule is only a STARTING point now -- the sampler
-# re-places the rungs between rounds from the communication barrier it measures, so beta_min is
-# the one thing left to choose and n_rungs no longer has to be guessed well
+# Build the target and its ladder. The schedule is a starting point: unless adapt_schedule is
+# False, the sampler re-places the levels between rounds from the barrier it measures
 settings = SETTINGS[args.target]
 for key in ['thin', 'n_local', 'n_rungs', 'beta_min', 'step_size', 'melt_beta', 'melt_scans']:
     if getattr(args, key) is None:
@@ -146,10 +91,8 @@ config = vars(args)
 device = torch.device(args.device)
 target = settings['target']().to(device)
 
-# Compile the energy and score chunks. Every target here evaluates on all-pairs temporaries, which
-# eager torch reads and writes once per elementwise op, and inductor fuses the whole chain: on the
-# binary glass that is 1300 against 33 600 chain-scans per second on an RTX A6000, with the score
-# agreeing to 2e-6
+# Compile the energy and score chunks, so inductor fuses the elementwise ops on their all-pairs
+# temporaries
 target.energy_chunk = torch.compile(target.energy_chunk, dynamic=False)
 target.score_chunk = torch.compile(target.score_chunk, dynamic=False)
 if settings.get('schedule') == 'geometric':
@@ -160,14 +103,10 @@ else:
 print('target %s  dim %d  rungs %d  beta %.4f .. 1.0' % (
     target.name, target.dim, len(beta), float(beta[0])))
 
-# Set the seed and start every rung from the target's own fixed starting configuration, so the run
-# is reproducible and no released data is needed to begin
-# The lattice jitter is 0.02 because the binary glass's lattice spacing is 1.0, already inside the
-# AA minimum: at 0.05, 214 of 10 240 starts put a pair closer than 0.75, where the AA force is
-# ~1e4 per unit of log density, and HMC tuned on the equilibrium ensemble never accepts a move from
-# there. One calibration had two such chains (E/N 4.09 and 2.95, closest pairs 0.717 and
-# 0.730) and read tau as its whole collection window. At 0.02 the closest pair over 10 240 starts
-# is 0.853
+# Set the seed and start every level from the target's own fixed starting configuration, so the
+# run is reproducible and no released data is needed to begin. The lattice jitter is 0.02: the
+# binary glass's lattice spacing of 1.0 is already inside the AA minimum, and a larger jitter puts
+# pairs so close that HMC tuned on the equilibrium ensemble never accepts a move from them
 torch.manual_seed(args.seed)
 gen = torch.Generator(device='cpu').manual_seed(args.seed)
 # --start replaces both with configurations of an earlier run, deep states of the same target,
@@ -190,12 +129,9 @@ x0 = start.to(device)[None].expand(len(beta), args.n_chains, target.dim).contigu
 
 # Run: rounds of doubling length, the schedule and the step sizes re-tuned between them, and
 # every kept state drawn in the final round where nothing is being adapted any more
-# --freeze reuses a calibration's converged schedule and step sizes and adapts NOTHING, which
-# turns the doubling's permanent 2x -- the discarded rounds sum to 2^n_rounds - 2 against a
-# collection round of 2^n_rounds -- into a burn-in of a few autocorrelation times. Measured on dw4
-# from the start this generator actually uses, a frozen run reproduces the calibration it came from:
-# Lambda 1.6539 against 1.6515, explorer acceptance 0.644-0.649 against 0.644-0.652, round trips
-# 0.1338/scan against 0.1394. n_rounds becomes 1 and n_scans sets the length.
+# --freeze reuses a calibration's converged schedule and step sizes and adapts nothing, which
+# replaces the discarded doubling rounds, as long as the collection round, with a burn-in of a few
+# autocorrelation times. n_rounds becomes 1 and n_scans sets the length.
 schedule, step_size, n_rounds = beta, args.step_size, args.n_rounds
 if args.freeze:
     measured = json.loads((cache_dir() / 'plan' / (target.name + '_plan.json')).read_text())
@@ -229,10 +165,9 @@ if args.resume:
     print('resuming %s: %d stored per chain over %d segments' % (
         stem, len(stored), previous['n_segments']))
 
-# Melt the start at a level where the particles mix, then hand the melt to every rung. The lattice
-# puts the binary glass's 13 B particles on consecutive sites: from there its cold rung still had
-# 0.53 B-B contacts per configuration after 30 000 scans, against 0.17 at equilibrium, while at
-# T = 1.0 the contacts decorrelate in ~70 scans
+# Melt the start at a level where the particles mix, then hand the melt to every level. The lattice
+# puts the binary glass's B particles on consecutive sites, which the cold levels take far longer
+# to undo than a melt does
 start_time = time.time()
 explorer = hmc_explorer(n_steps=args.n_local, n_leapfrog=args.n_leapfrog)
 if args.melt_scans and args.start is None:
@@ -255,7 +190,7 @@ def write(samples, diagnostics, extra):
     whose name and sha256 are kept, and 'melt' otherwise.
 
     Args:
-        * samples (torch.Tensor of shape (n_keep, n_chains, dim)): States of the beta = 1 rung
+        * samples (torch.Tensor of shape (n_keep, n_chains, dim)): States of the beta = 1 level
         * diagnostics (dict): What non_reversible_parallel_tempering returned last
         * extra (dict): Diagnostics to record beside the protocol
 
@@ -302,7 +237,7 @@ if stored is not None:
     samples = torch.cat([stored, samples])
 
 # --hours makes n_scans one SEGMENT of a run that lasts as long as the wall clock allows. Each
-# segment continues from the last one's rung-ordered state, so the segments are one chain, and the
+# segment continues from the last one's level-ordered state, so the segments are one chain, and the
 # shard is rewritten after every one: a job then costs its hours whatever GPU it lands on, and a
 # job stopped early keeps every segment it finished
 n_segments, round_trips = 1, diagnostics['round_trips']
@@ -343,14 +278,11 @@ print('step size       ', [round(float(v), 5) for v in diagnostics['step_size']]
 print('round trips per chain (final round): mean %.1f  min %.0f  max %.0f'
       % (float(round_trips.mean()), float(round_trips.min()), float(round_trips.max())))
 
-# The barrier turns the round-trip rate into a number with something to be compared against:
-# 1 / (2 + 2 Lambda) is what an ideal local kernel would reach on this path, so the ratio is a
-# direct measure of how far the local exploration falls short of refreshing a state per scan
-# One machine's round trip is not free even on a perfect ladder: it walks 2 (n_rungs - 1) rungs
-# at best and takes n_rungs (2 + 2 Lambda) scans in practice, so the cost of one INDEPENDENT
-# configuration is n_rungs^2 (2 + 2 Lambda) n_local energy evaluations. At the optimal n_rungs =
-# 2 Lambda that is ~8 Lambda^3 n_local, i.e. CUBIC in the barrier -- which is why the hot end of
-# the path is worth choosing carefully and why gen/audit/barrier.py exists
+# The round-trip rate against 1 / (2 + 2 Lambda), what an ideal local kernel reaches on this path.
+# One machine's round trip walks 2 (n_rungs - 1) levels at best and takes n_rungs (2 + 2 Lambda)
+# scans in practice, so one independent configuration costs about n_rungs^2 (2 + 2 Lambda) n_local
+# energy evaluations, ~8 Lambda^3 n_local at n_rungs = 2 Lambda. The hot end of the path sets the
+# cost, and gen/audit/barrier.py profiles it
 print('one machine round trip: %.0f scans observed, %.0f ideal, %.0f ballistic floor'
       % (diagnostics['scans_per_round_trip'], diagnostics['ideal_scans_per_round_trip'],
          diagnostics['ballistic_scans_per_round_trip']))
@@ -359,15 +291,10 @@ print('round trip rate  %.4f   against the %.4f this barrier allows (%.0f%% of i
          100.0 * diagnostics['round_trip_rate'] / diagnostics['predicted_round_trip_rate']))
 print('log Z(1) / Z(%.2f)  %.4f' % (args.beta_min, diagnostics['log_normaliser']))
 
-# A rung whose local kernel never accepts is frozen, and with no reference at beta = 0 there is
-# nothing to refresh it: it holds one configuration for the whole run and poisons every swap it
-# is offered. The schedule adaptation cannot see this, so it is asserted separately
-# The per-rung MEAN hides a single frozen chain among hundreds, and a frozen chain is not
-# harmless: every rung starts from the same configuration, so a chain whose local kernel never
-# accepts holds twelve identical states, accepts every swap it is offered, and runs its round-trip
-# count to the ballistic maximum while contributing one configuration to the output
-# Both checks hold under --calibrate too: a frozen chain's constant energy makes the between-chain
-# spread read tau as the length of the run, and the production run would be sized from it
+# Assert that no level and no chain is frozen. With no reference at beta = 0 nothing refreshes a
+# frozen chain, and since every level starts from the same configuration it accepts every swap and
+# reaches the ballistic round-trip count while contributing one configuration. Both checks hold
+# under --calibrate too, where a frozen chain would inflate the tau the production run is sized from
 frozen = float(diagnostics['explorer_acceptance_per_chain'].min())
 assert frozen > 0.01, (
     'some (rung, chain) pair accepts only %.4f of its local moves: that chain is frozen and holds '
@@ -379,9 +306,8 @@ assert float(diagnostics['explorer_acceptance'].min()) > 0.01, (
     % int(diagnostics['explorer_acceptance'].argmin())
 )
 
-# A ladder nobody travels is a ladder that did nothing: every chain must have made the round trip
-# from the cold rung to the hot one and back, several times over, or the cold samples are just a
-# long local chain wearing a tempering costume
+# Every chain must make several round trips between the two ends of the ladder, and no adjacent
+# pair may reject almost every swap
 assert args.calibrate or float(round_trips.min()) >= args.min_round_trips, (
     'only %.0f round trips on the worst chain: raise n_rounds, soften beta_min, or give the '
     'ladder the %d rungs its barrier asks for'
@@ -393,17 +319,11 @@ assert args.calibrate or float(diagnostics['rejection'].max()) < 0.95, (
                          float(diagnostics['rejection'].max()))
 )
 
-# What the thinning bought, measured rather than assumed, over the observables the metrics are
-# actually built from. The ENERGY is not enough on its own and that is the whole point: on
-# ka-binary-N64-T0.2 the energy reads tau = 8 scans while the pair distances read ~88, so an
-# energy-only diagnostic calls a set fine when it carries a tenth of its nominal size. Jung et al
-# 2024 make the same point for the glass formers -- the energy plateaus long before the ensemble
-# does.
-#
-# The distances are SORTED, because compare_histograms pools every pair of every configuration
-# into one histogram and so never sees which pair is which; a distance read at a fixed index
-# instead tracks one labelled atom pair and decorrelates only when particles swap places, a
-# symmetry the metric quotients out. On LJ-55 that is tau = 63 against 9.
+# Measure the efficiency of the stored set on the observables the metrics are built from. The
+# energy alone is not enough, since it decorrelates long before the structure does (Jung et al.
+# 2024 for the glass formers). The distances are sorted because compare_histograms pools every pair
+# into one histogram, while a distance at a fixed index tracks one labelled pair and decorrelates
+# only when particles permute, a symmetry the metric quotients out.
 n_keep = len(samples)
 flat = samples.reshape(-1, target.dim)
 energy = target.energy(flat) if hasattr(target, 'energy') else -target.log_prob(flat)
@@ -419,9 +339,8 @@ for fraction in [0.1, 0.5, 0.9]:
 ess = effective_sample_size(observables)
 
 # The spread of the per-chain means against what independence predicts. It needs no lag window,
-# so it disagrees with the autocorrelation function exactly where the ACF is weakest: a lag window
-# that is too short reads tau LOW, and a few chains stuck at their own mean read tau HIGH. On
-# LJ-55 the two disagreed by a factor of sixty and this one was right.
+# so it disagrees with the autocorrelation function where the ACF is weakest: a lag window that is
+# too short reads tau low, and a few chains stuck at their own mean read tau high
 dispersion = chain_mean_dispersion(observables)
 print('\nworst tau %.2f stored states, on %s' % (ess['tau'], ess['name']))
 print('between-chain check: tau %.2f on %s (1 is independent)'
@@ -429,9 +348,8 @@ print('between-chain check: tau %.2f on %s (1 is independent)'
 print('effective sample size %.0f of %d stored (%.0f%%)'
       % (ess['n_effective'], n_keep * args.n_chains, 100 * ess['efficiency']))
 
-# A shard is not a reference set: gen/merge_shards.py gates the merged one, on every chain of every
-# shard. One shard's own estimate is too noisy to gate on -- 43 binary-glass shards of 42 chains at
-# one thin read anywhere from 29% to 73% -- and a shard that missed would lose its states
+# A shard is not gated on its own efficiency, which is too noisy at a shard's chain count and
+# would lose its states on a miss: gen/merge_shards.py gates the merged set on every chain
 assert args.calibrate or args.shard is not None or ess['efficiency'] > 0.5, (
     'the stored set is worth %.0f%% of its length: raise --thin to about %d, or raise --n_local '
     'if the round-trip rate is far below what the barrier allows'
@@ -451,10 +369,11 @@ per_particle = getattr(target, 'n_particles', getattr(target, 'n_atoms', 1))
 print('energy: mean %.4f  std %.4f  (per particle %.4f)' % (
     float(energy.mean()), float(energy.std()), float(energy.mean()) / per_particle))
 
-# A calibration run measures and does not produce. It skips the acceptance checks above -- the
-# whole point is that its thin is wrong -- writes no reference set, and leaves a plan file that
-# --freeze reads back and the production shards are sized from. Its throughput is recorded too,
-# because that is a property of the GPU it landed on and not of this machine.
+# A calibration run measures and writes no reference set. It skips the round-trip, swap and
+# efficiency checks above, since its thin is what it measures, and leaves a plan file that --freeze
+# reads back
+# and the production shards are sized from. Its throughput is recorded too, as a property of the
+# GPU it ran on.
 if args.calibrate:
     folder = cache_dir() / 'plan'
     folder.mkdir(parents=True, exist_ok=True)

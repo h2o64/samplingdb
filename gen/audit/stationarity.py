@@ -1,4 +1,4 @@
-# Is a released split an equilibrium sample of the density this corpus builds for it
+# Check whether a released split is an equilibrium sample of the density samplingdb builds for it
 
 # Libraries
 import argparse, pathlib, pprint, sys
@@ -29,12 +29,9 @@ pprint.pprint(config)
 device = torch.device(args.device)
 target = Peptide(sequence=args.sequence).to(device)
 
-# Start ON the released frames, evenly spaced through the file. If they are an equilibrium sample
-# of this density then the energy does not move; if they are not, it relaxes, and which way it
-# relaxes says which of the two is wrong. This is the test that settled the Lennard-Jones energy
-# convention -- the released frames were stationary under one reading of the pair sum and drifted
-# by 3.3 sigma under the other -- and it is the only one that compares a density to a file without
-# needing either to be right first.
+# Start on the released frames, evenly spaced through the file. If they are an equilibrium sample
+# of this density the energy does not move; if they are not, it relaxes, and the direction says
+# which of the two is wrong. The test compares a density to a file without assuming either is right.
 released = target.load_split(args.split).to(device).reshape(-1, target.dim)
 step = max(1, len(released) // args.n_replicas)
 x = released[::step][:args.n_replicas].contiguous()

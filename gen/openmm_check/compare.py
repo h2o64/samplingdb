@@ -10,9 +10,8 @@ from samplingdb.targets.molecular import PEPTIDE_SYSTEMS, Peptide
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from openmm_bridge import OpenMMBridge
 
-# Every OpenMM platform worth timing, with the properties that define what it actually computes.
-# 'mixed' is what boltzkit asks for and is NOT double precision; it is here to be honest about the
-# speed such a choice buys.
+# Every OpenMM platform worth timing, with the properties that define what it computes. 'mixed' is
+# what boltzkit asks for and is not double precision; it is timed for comparison only.
 PLATFORMS = [
     ('Reference', {}),
     ('CPU 1 thread', {'Threads': '1'}),
@@ -202,7 +201,7 @@ def main():
         assert force_error < 1e-4, '%s: the forces differ by %.2e of their rms' % (
             sequence, force_error)
 
-    # 2. That the score survives being differentiated through, which the OpenMM bridge never did
+    # 2. That the score can be differentiated through, which the OpenMM bridge does not allow
     print()
     for sequence in args.sequences:
         target = targets[sequence]

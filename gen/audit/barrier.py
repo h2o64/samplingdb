@@ -1,4 +1,4 @@
-# Profile where on the annealing path a target's communication barrier actually sits
+# Profile where on the annealing path a target's communication barrier sits
 
 # Libraries
 import argparse, pathlib, pprint, sys, time
@@ -26,15 +26,15 @@ config = vars(args)
 # Print the config
 pprint.pprint(config)
 
-# Build the target on a fine ladder, because the point is to RESOLVE the barrier rather than to
-# sample well: a schedule with many more rungs than 2 Lambda reads the density at many places
+# Build the target on a fine ladder, which resolves the barrier: a schedule with many more levels
+# than 2 Lambda reads the density at many places
 device = torch.device(args.device)
 target = build(args.target).to(device)
 beta = linear_schedule(args.n_rungs, args.beta_min, dtype=target.dtype, device=device)
 
 torch.manual_seed(args.seed)
 gen = torch.Generator(device='cpu').manual_seed(args.seed)
-# The lattice jitter is gen/parallel_tempering/generate.py's, where 0.05 froze chains
+# The lattice jitter is gen/parallel_tempering/generate.py's
 if hasattr(target, 'lattice_configuration'):
     start = target.lattice_configuration(args.n_chains, jitter=0.02, generator=gen)
     start = start.reshape(args.n_chains, -1)
@@ -44,8 +44,8 @@ else:
                                        dtype=target.dtype)
 x0 = start.to(device)[None].expand(args.n_rungs, args.n_chains, target.dim).contiguous()
 
-# Run the sampler only to read its diagnostics: the schedule adaptation equalises the REJECTIONS,
-# so the rung spacing it settles on is itself the answer, and rejection / d beta is the density
+# Run the sampler only to read its diagnostics: the schedule adaptation equalises the rejections,
+# so the level spacing it settles on is itself the answer, and rejection / d beta is the density
 start_time = time.time()
 _, diagnostics = non_reversible_parallel_tempering(
     target.log_prob, target.score, x0, beta,
@@ -53,9 +53,9 @@ _, diagnostics = non_reversible_parallel_tempering(
     reference=None, step_size=args.step_size, generator=None, thin=1, return_diagnostics=True)
 elapsed = time.time() - start_time
 
-# The caloric curve and the barrier density, rung by rung. lambda(beta) = sqrt(Var_beta(V) / pi)
-# for a Gaussian V, so the two columns are a check on each other, and Lambda(beta_min) is what
-# says how much of the total a given hot end is actually paying for
+# The caloric curve and the barrier density, level by level. lambda(beta) = sqrt(Var_beta(V) / pi)
+# for a Gaussian V, so the two columns are a check on each other, and Lambda(>= beta) is the share
+# of the total a hot end at beta pays for
 beta, mean, deviation = diagnostics['beta'], -diagnostics['value_mean'], diagnostics['value_std']
 rejection, density = diagnostics['rejection'], diagnostics['barrier_density']
 remaining = torch.cat([rejection.flip(0).cumsum(0).flip(0),
@@ -72,7 +72,7 @@ for k in range(len(beta)):
         row += ' %9s %9s' % ('', '')
     print(row + ' %11.3f' % remaining[k])
 
-# What a given hot end would cost, in rungs and in the round trips a collection round can hold
+# What a given hot end would cost, in levels and in the round trips a collection round can hold
 print('\n%10s %10s %8s %10s %14s' % ('beta_min', 'Lambda', 'rungs', 'scans/trip', 'rounds for 10'))
 for fraction in [0.0, 0.25, 0.5, 0.75, 0.9]:
     k = min(int(fraction * (len(beta) - 1)), len(beta) - 2)

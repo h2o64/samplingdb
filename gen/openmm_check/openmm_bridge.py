@@ -1,4 +1,4 @@
-# The retired OpenMM bridge, kept as the reference the torch force field is checked against
+# The OpenMM bridge, the reference the torch force field is checked against
 
 # Libraries
 import numpy as np
@@ -9,8 +9,8 @@ from samplingdb.targets.forcefield import GAS_CONSTANT, linlogcut
 class _OpenMMEnergy(torch.autograd.Function):
     """Evaluates an OpenMM energy in the forward pass and its forces in the backward one
 
-    NOTE: this is exactly why the bridge was retired. A custom Function that hands back a saved
-    tensor has no double backward, so a loss built on the score could never be differentiated.
+    NOTE: a custom Function that hands back a saved tensor has no double backward, so a loss built
+    on the score cannot be differentiated through this bridge.
     """
 
     @staticmethod
@@ -31,11 +31,9 @@ class OpenMMBridge:
     Positions are in nanometres and energies in kT, matching every reference implementation in
     this corpus (transferable-samplers' OpenMMEnergy, bgflow's OpenMMBridge).
 
-    WARNING: this was the slow part of the whole library, and is no longer what the targets use.
-    A single Context evaluates one configuration at a time -- OpenMM has no batched API -- so a
-    molecular target cost a Python loop per batch, with no two energies ever computed at the same
-    time. It lives on here as the reference compare.py checks samplingdb's TorchForceField
-    against, and as the thing whose throughput compare.py measures.
+    NOTE: the targets do not use this class. A Context evaluates one configuration at a time,
+    since OpenMM has no batched API, so a batch costs a Python loop. compare.py checks
+    samplingdb's TorchForceField against it and measures its throughput.
     """
 
     def __init__(self, system, temperature, platform_name='Reference', n_threads=1,

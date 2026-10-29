@@ -15,11 +15,10 @@ from manifest import manifest
 # decorrelation time: gen/merge_shards.py keeps every k-th stored state for the smallest k at which
 # the merged set is 90% efficient, so the thin is measured on the set rather than predicted.
 #
-# The structural relaxation time read off TRAJECTORIES (following each particle through the swaps,
-# which exchange positions) is ~2300 time units at T = 0.32 and ~265 at T = 1.0. A per-index
-# self-intermediate scattering function reads 509 and 40 instead, because every accepted swap
-# makes two indexes jump across the box; spacings set from those numbers left the T = 0.32 set
-# about 65% efficient.
+# The structural relaxation time read off trajectories, following each particle through the swaps
+# that exchange positions, is ~2300 time units at T = 0.32 and ~265 at T = 1.0. A per-index
+# self-intermediate scattering function reads it far shorter, because every accepted swap makes two
+# indexes jump across the box.
 SETTINGS = {
     0.32: {'spacing': 5000, 'n_stored': 44, 'burn': 20000},
     1.0: {'spacing': 400, 'n_stored': 20, 'burn': 4000},
@@ -50,8 +49,8 @@ config = vars(args)
 # Print the config
 pprint.pprint(config)
 
-# Build the target and the generator on the run's device: the draws are made there and the move is
-# compiled, which on a GPU is about 650 CPU cores' worth of the eager kernel
+# Build the target and the generator on the run's device: the draws are made there, and on a GPU
+# the move is compiled
 device = torch.device(args.device)
 target = KobAndersen2D(temperature=args.temperature).to(device)
 folder = cache_dir() / 'swapmc'

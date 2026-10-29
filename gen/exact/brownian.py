@@ -53,9 +53,8 @@ def conditional(log_inn, log_obs):
     """Returns the mean of the locations given the scales and the data, and the Cholesky factor of
     their precision, alpha_inn^-2 M^-1 + alpha_obs^-2 P_o
 
-    NOTE: the precision form, not the covariance one: subtracting two covariances loses the
-    smallest eigenvalues once the two scales are orders of magnitude apart, which put the density
-    check off by 0.09 where this form holds it to 1e-12.
+    NOTE: computed in precision form, because subtracting two covariances loses the smallest
+    eigenvalues once the two scales are orders of magnitude apart.
     """
     precision = (torch.exp(-2 * log_inn)[:, None, None] * walk_precision
                  + torch.exp(-2 * log_obs)[:, None, None] * mask)
@@ -105,7 +104,7 @@ print('marginal likelihood bound %.6f at log scales (%.4f, %.4f)' % (bound, *bes
 # 3. Rejection from the prior: propose both log scales from their N(0, 2^2) priors and accept with
 # probability L(scales) / max L, which is exact whatever the shape of the posterior; then draw the
 # locations from their exact conditional. The prior's tails are the posterior's in the direction
-# where the data stop constraining alpha_obs, which is what a Stan run under-sampled
+# where the data stop constraining alpha_obs, so the proposal covers that tail
 start = time.time()
 kept, proposed = [], 0
 while sum(len(block) for block in kept) < args.n_samples:

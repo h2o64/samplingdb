@@ -1,4 +1,4 @@
-# Measure how decorrelated a generated reference set actually is, along its own chain axis
+# Measure how decorrelated a generated reference set is, along its own chain axis
 
 # Libraries
 import argparse, json, pathlib, pprint, sys
@@ -22,11 +22,9 @@ def observables(x, target):
     applies the minimum image and Peptide.preprocess IS the distance map, and a hand-rolled
     triangle would get both wrong.
 
-    WARNING: for anything with a particle structure the raw coordinates are deliberately NOT
-    reported. A cluster's centre of mass and its orientation both diffuse freely, and neither is
-    part of the density: an unpreprocessed radius of gyration reads tau = 429 sweeps on DW-4
-    against 5.5 once centred, and a Cartesian coordinate of LJ-13 reads 21 against 11 for the pair
-    distances it is actually scored on. Those numbers measure the symmetry, not the sampler.
+    WARNING: for anything with a particle structure the raw coordinates are not reported. A
+    cluster's centre of mass and its orientation both diffuse freely and neither is part of the
+    density, so their autocorrelation measures that symmetry and says nothing about the sampler.
 
     Args:
         * x (torch.Tensor of shape (n_frames, n_chains, dim)): The reference set, unflattened
@@ -49,12 +47,10 @@ def observables(x, target):
         distances = distances.reshape(n_frames, n_chains, -1)
         series['mean pair distance'] = distances.mean(-1).T
 
-        # SORTED, because compare_histograms pools every pair of every configuration into one
-        # histogram: the metric never sees which pair is which. A distance read at a fixed INDEX
-        # instead tracks one labelled atom pair, and decorrelates only when the particles permute
-        # -- a symmetry the metric quotients out, so it reads slow for a reason that is not the
-        # density. On LJ-55 a fixed-index distance reads tau = 65 sweeps where the
-        # permutation-invariant mean over the same distances reads 8.5
+        # Sorted, because compare_histograms pools every pair of every configuration into one
+        # histogram and never sees which pair is which. A distance at a fixed index tracks one
+        # labelled atom pair and decorrelates only when the particles permute, a symmetry the
+        # metric quotients out
         ordered = torch.sort(distances, dim=-1).values
         for fraction in [0.1, 0.3, 0.6, 0.9]:
             k = int(fraction * (ordered.shape[-1] - 1))
@@ -88,9 +84,9 @@ folder = cache_dir() / args.folder
 array = np.load(folder / (target.reference_key() + '.npy'))
 n_chains = args.n_chains
 if n_chains is None:
-    # Stan's draws are randomly PERMUTED before saving, so they have no chain axis left and an
-    # autocorrelation along the file would read 1 whatever the sampler did. Its manifest records
-    # min_ess_bulk instead, which is the honest number and is already gated in gen/stan
+    # Stan's draws are randomly permuted before saving, so they have no chain axis left and an
+    # autocorrelation along the file would read 1 whatever the sampler did. Their manifest records
+    # min_ess_bulk instead, which gen/stan/generate.py gates
     assert FOLDERS[args.folder] is not None, (
         'the ' + args.folder + ' sets are permuted before saving, so there is no ordering to '
         'measure. Read min_ess_bulk out of the manifest instead, or pass --n_chains to override.')
@@ -121,9 +117,8 @@ if worst > 1.2:
     print('the spacing is too short by %.1fx: regenerate with thin (or spacing) that much larger'
           % worst)
 
-# An autocorrelation time is only estimable from a series many times longer than itself. Below
-# ~50 frames per chain the window lands on noise and reads HIGH, so a short file looks worse than
-# it is -- a 20-frame dw4 run reads 1.51 where 4000 sweeps of the same protocol read 0.60
+# An autocorrelation time is only estimable from a series many times longer than itself, so
+# below ~50 tau frames per chain the estimate is unreliable
 if n_frames < 50 * worst:
     print('WARNING: %d frames per chain is too few to estimate tau %.2f -- this reads high. '
           'Audit a full-length run.' % (n_frames, worst))

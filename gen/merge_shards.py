@@ -132,10 +132,9 @@ for k in range(1, max(lengths) + 1):
     n_chains = observables['energy'].shape[0]
 
     # Whether the start is forgotten: each observable's first tenth of kept states against its
-    # last half, chain by chain. Chains are independent, so the spread of their differences is an
-    # honest standard error whatever the autocorrelation, and a transient shows up directly instead
-    # of through the efficiency. AAAAAA's first production run drifted 52 standard errors on
-    # cos phi5 here while its efficiency read 73%
+    # last half, chain by chain. Chains are independent, so the spread of their differences is a
+    # valid standard error whatever the autocorrelation, and a transient shows up here even when
+    # the efficiency looks fine
     head = max(1, m // 10)
     drifts = {}
     for name, values in observables.items():
