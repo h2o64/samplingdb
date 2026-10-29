@@ -1,9 +1,9 @@
 # Bayesian posteriors (Tier 2)
 
 Seven posteriors, each in an unconstrained parameterisation with its log-Jacobian written out by
-hand. They work in float64. None has a known `log Z`, and none had a reference ensemble in the
-literature (Blessing et al. 2024 report only ELBO and EUBO on them), so the references are this
-library's Stan runs.
+hand. They work in float64. None has a known `log Z` or a published reference ensemble (Blessing et
+al. 2024 report only ELBO and EUBO on them), so the references are this library's Stan runs and,
+for `brownian`, an exact sampler.
 
 | Target | dim | `name` | Model |
 | --- | --- | --- | --- |
@@ -36,11 +36,13 @@ of a funnel.
   <img alt="Seeds posterior in log tau and b_1 for the test and train splits, and the log tau marginal of both" src="../figures/images/posteriors_seeds_light.png">
 </picture>
 
-The reference density of `log tau` and the first random effect `b_1`, from 4096 test draws, with
-the marginals of 512 test and 512 train draws on its edges. A small `tau` lets every `b_i` spread
-out, which is the wide end of the funnel. The train chains, 500 MALA steps from `N(0, 2^2 I)`, end
-with `log tau` 1.36 reference standard deviations too low (`log_tau_mean_err`), so their `b_1`
-spreads too wide. The 512 test draws read 0.03.
+The density of `log tau` and the first random effect `b_1` from one half of the test split, with
+the marginals of the other half and of the train split on its edges. A small `tau` lets every `b_i`
+spread out, which is the wide end of the funnel. The train split comes from MALA chains started
+from `N(0, 2^2 I)`, each on the posterior tempered to its own temperature, from slightly colder
+than the posterior to three times hotter. On the top marginal it sits far into the wide end, at
+smaller `log tau` than the test split, so its `b_1` marginal on the right is wider. The two test
+halves agree, which is the floor `log_tau_mean_err` and `log_tau_w1` are read against.
 
 **Brownian.** `alpha_inn, alpha_obs ~ LogNormal(0, 2)`, `x_1 ~ N(0, alpha_inn)`,
 `x_i ~ N(x_{i-1}, alpha_inn)`, and `y_i ~ N(x_i, alpha_obs)` observed for `i` in 1..10 and 21..30.
@@ -52,20 +54,22 @@ funnel of the tier, and the middle ten steps are constrained only by the random 
   <img alt="Posterior bands of the Brownian path for the test and train splits over the 20 observations, and the joint of the two log scales" src="../figures/images/posteriors_brownian_light.png">
 </picture>
 
-The posterior of the path `x_t` (median, 50 % and 90 % bands) from 512 test and 512 train draws,
-with the 20 observations as dots and the ten unobserved steps shaded. On the right, the reference
-density of the two log scales from 4096 other test draws, with both splits in its marginals. The
-test bands widen over the gap, where only the random walk constrains the path. The train chains,
-500 MALA steps from `N(0, I)`, keep both scales too large, so their bands are wide everywhere. The
-three Brownian metrics read about 3 standard deviations for the train split and under 0.07 for the
-512 test draws.
+The posterior of the path `x_t` (median, 50 % and 90 % bands) from the test and train splits,
+with the 20 observations as dots and the ten unobserved steps shaded. On the right, the density of
+the two log scales from one half of the test split, with the other half and the train split in its
+marginals. The test bands widen over the gap, where only the random walk constrains the path. The
+train split comes from MALA chains on the posterior tempered from slightly colder than it to half
+again as hot, started with both log scales drawn uniformly over a wide range and the locations at
+the observations. Its bands are wider over the gap, its innovation scale is too large, and its
+observation scale reaches far down the neck of the funnel: chains started deep in the neck stay
+there, which is the long tail of the right marginal.
 
 **LGCP.** `log N(x; mu, K) + sum_i [x_i c_i - a exp(x_i)]` with an exponential kernel
 `K = sigma^2 exp(-|m - n| / (40 beta))`, `sigma^2 = 1.91`, `beta = 1/33`,
 `mu = log(126) - sigma^2 / 2` and `a = 1/1600`. `LGCP()` samples `x` directly, the setting of
 Blessing et al. 2024. `LGCP(whitened=True)` samples `e` with `x = L e + mu`; it is a different
 geometry with its own name. Both have a Stan reference set, but the direct one needs a dense
-1600 x 1600 triangular solve per gradient: its run took 29 hours, against 30 minutes for the
+1600 x 1600 triangular solve per gradient: its run takes 29 hours, against 30 minutes for the
 whitened one.
 
 <picture>
@@ -74,20 +78,26 @@ whitened one.
 </picture>
 
 The posterior mean of the intensity `exp(x)`, with the 126 saplings on top, and the posterior
-standard deviation of `x`, from 512 test and 512 train draws of `lgcp`, each quantity on one shared
+standard deviation of `x`, from the test and train splits of `lgcp`, each quantity on one shared
 scale. The test split puts the intensity where the saplings cluster and is most certain there. The
-train chains start from the Gaussian prior and 500 MALA steps of size 0.0005 leave them close to
-it, so their field keeps the prior's flat mean and uniform spread. The two LGCP metrics read 6.79
-and 0.52 for the train split, against 0.80 and 0.002 for 512 other test draws.
+train split comes from MALA chains started from the Gaussian prior `N(mu, K)`, each on the
+posterior tempered from slightly colder than it to three times hotter. It finds the same clusters,
+but its field is more uncertain everywhere and its intensity is higher between the saplings, so it
+expects more saplings in total (`total_intensity_err`) and its neighbouring cells covary more
+(`neighbour_correlation_err`). Both are scored against the other half of the test split, and the
+first half's score is their floor.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../figures/images/posteriors_lgcp_draws_dark.gif">
-  <img alt="Thirty single test draws of the LGCP intensity field with the pine saplings on top" src="../figures/images/posteriors_lgcp_draws_light.gif">
+  <img alt="Single draws of the LGCP intensity field from the test and train splits side by side, with the pine saplings on top" src="../figures/images/posteriors_lgcp_draws_light.gif">
 </picture>
 
-Thirty single test draws of the intensity field, on one linear scale. Each draw is far rougher
-than the posterior mean: the kernel correlates cells over 40 beta = 1.2 cells, the structure
-`neighbour_correlation_err` measures.
+Single draws of the intensity field, a test draw on the left and a train draw on the right in
+every frame, on one linear scale whose top is set by the test draws. The draws are rows evenly
+spaced over each split, so the train frames come from chains across the recipe's whole range of
+temperatures. Each draw is far rougher than the posterior mean: the kernel correlates cells over
+40 beta = 1.2 cells, the structure `neighbour_correlation_err` measures. The train draws carry more
+cells above the top of the scale.
 
 ## Metric panel
 
@@ -108,11 +118,12 @@ Every posterior reports moments relative to the reference spread:
 
 What `return_hist=True` holds, drawn per coordinate for the four logistic regressions: the error of
 the posterior mean in reference standard deviations (left) and of the standard deviation (right).
-512 train draws and 512 test draws are scored against the same 4096 other test draws, so the test
+The train split and one half of the test split are scored against the other half, so the test
 points are the floor the train split is read against. The ringed points are the coordinates the
-`max_*` metrics report. On the means the train split is two to five times its floor on ionosphere,
-sonar and breast-cancer and at its floor on german-credit; on the standard deviations it is at its
-floor on all four.
+`max_*` metrics report. The train chains start from the prior `N(0, I)` and run on the posterior
+tempered from slightly colder than it to three times hotter, so the train split is too wide on
+every coordinate and its means scatter on both sides of the reference's, while the test half
+sits on zero.
 
 Each posterior then adds the quantities it is judged on, because an average over coordinates hides
 the hard one:
@@ -139,7 +150,7 @@ converges as the sample count grows.
 | --- | --- |
 | test | Stan, `gen/stan/generate.py`, published as `stan/<name>_<spec_id>.npy` and downloaded on first use. The Stan models are written in this library's coordinates and checked against the torch density before sampling. See [Reference sets](../reference-sets.md#stan-posteriors). |
 | test, `brownian` | Exact draws, `gen/exact/brownian.py`, published as `exact/brownian_<spec_id>.npy`. See [Reference sets](../reference-sets.md#exact-sampler-brownian-motion). |
-| train | One 500-step MALA chain per sample, seed 0, from an independent `N(0, prior_scale^2 I)` draw, which is the prior of the logistic regressions; `LGCP` starts from its Gaussian prior `N(mu, K)`. It is informal: useful as a warm start, not for evaluation. The observed data on the target is this tier's real training data. |
+| train | 1000 MALA chains, chain `i` on the tempered posterior at a factor running geometrically from 0.8 to 3 with `i` (to 1.5 on `brownian`). The step size of every chain adapts towards 57% acceptance over 1000 moves, after which each keeps one state every 10 moves. The chains start from `N(0, prior_scale^2 I)`, the prior of the logistic regressions; `LGCP` from its Gaussian prior `N(mu, K)`; `brownian` across both of its funnels, with uniform log scales and the locations at the observations. The split is overdispersed in every coordinate and spans the test energies at both ends. |
 
 Brownian's exact reference gives scale means of 0.1156 (innovation) and 0.1127 (observation).
 `inference_gym`'s published ground truth gives 0.11985 and 0.10105, up to 0.31 posterior standard

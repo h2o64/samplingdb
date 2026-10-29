@@ -50,11 +50,12 @@ each projection gives the larger distance, so non-finite rows can only raise `ks
   <img alt="Sliced KS on TwoModes: two sample sets, their CDFs along one direction, and the KS distance on each of 128 directions" src="figures/images/metrics_sliced_ks_light.png">
 </picture>
 
-`ks` on `TwoModes`: 2048 train samples, whose mode weights are 1/2 : 1/2, against 2048 test draws
-at 2/3 : 1/3. Along the direction `u` the two projected CDFs differ by at most 0.182. `ks` is the
-mean of that distance over the 128 directions the panel draws, 0.170. Directions near 135 degrees,
-orthogonal to the line through the two modes, project both modes onto one point and see almost no
-difference.
+`ks` on `TwoModes`: the train split, which puts most of its mass in the light mode, against the
+test split at the true 2/3 : 1/3; the left panel draws a subsample of each. Along the direction `u`
+the largest gap between the two projected CDFs is the difference between the two splits' weights of
+the heavy mode. `ks` is the mean of that gap over the 128 directions the panel draws. Directions
+near 135 degrees, orthogonal to the line through the two modes, project both modes onto one point
+and see almost no difference.
 
 `mmd` and `w2` are quadratic, so they are computed only with `skip_costly_metrics=False`, on
 `n = min(len(samples), len(ref_samples), max_costly_samples)` rows per side, `max_costly_samples`
@@ -63,6 +64,14 @@ all of its states. The reference side is a uniform subset. The scored side is on
 unweighted; with weights it is `n` rows drawn in proportion to them by systematic resampling
 (`metrics.subsample`), so both metrics compare two unweighted sets. The peptide panel draws the
 `max_ot_samples` rows of `torus_w2`, `tica_w2` and `tica_k_jsd` the same way.
+
+**WARNING: `tica_k_jsd` barely sees the alpha-R / beta split.** Its k-means runs on the raw TICA
+coordinates, as `transferable-samplers` runs it, and TIC 1 spreads 90 times wider than TIC 2 on
+Ace-A-Nme, so the 20 clusters are bands across TIC 1 while alpha-R and beta differ along TIC 2.
+Reference structures with every alpha-R one removed (41% of the ensemble) read 0.014 against a
+floor of 0.004, where `torus_k_jsd` reads 0.237 against 0.002. The number is kept as upstream
+defines it, so that it compares with theirs; read basin populations off `torus_k_jsd` and the
+torsion panel.
 
 ## Mode coverage
 
@@ -82,11 +91,13 @@ that fail in different ways.
 On the mixtures (`GMM40`, `MoS`, `TwoModes`, `BracketTwoModes`, `ManyModes`, `EightGaussians`) the
 empirical weight of component `k` is the (weighted) mean of its responsibility
 `w_k pi_k(x) / sum_j w_j pi_j(x)` over the samples. Under exact draws its expectation is `w_k`
-whether or not the components overlap. Counting the component each sample is closest to would
-instead measure the mass of the region where each component dominates, which differs
-from `w_k` where components overlap: on `MoS` exact draws then read `tv_weights` of about 0.04 at
-any sample size. `Rings`, `Checkerboard` and `ManyWell` count labels: the nearest ring, the square,
-the side of each well.
+whether or not the components overlap. `Rings`, `Checkerboard` and `ManyWell` count labels: the
+nearest ring, the square, the side of each well.
+
+`tv_weights` is never 0 on a finite sample. On `K` equally weighted, well separated modes exact draws
+read about `sqrt(2 K / (pi n))`, the mean absolute deviation of a multinomial: on GMM-40, 0.110 at
+n = 2048, 0.048 at 10^4 and 0.015 at 10^5 over 20 seeds, against 0.112, 0.050 and 0.016 from the
+formula. Read a sampler's number against that floor at its own `n`.
 
 ## Binning
 
@@ -94,7 +105,10 @@ the side of each well.
   own range, the samples binned on the same edges, each side renormalised.
   `tests/test_metrics.py` reproduces DEM's value to 1e-12. Mass that falls outside the reference
   range is dropped by that protocol, so every total variation comes with its dropped mass,
-  `*_out_of_range`; the `*_w1` metrics need no binning.
+  `*_out_of_range`; the `*_w1` metrics need no binning. A sample with all of its mass outside
+  reads a total variation of 1 and an `*_out_of_range` of 1.
+- **Energy total variations saturate at 1** once the two sets no longer overlap, so past that point
+  only `energy_w1` still ranks samplers.
 - **Particle energies** use 100 bins over the ranges DEM fixes per system: `(-26, 0)` for DW-4,
   `(-60, 0)` for LJ-13, `(-380, -180)` for LJ-55.
 - **Glass distances** use edges pinned by the box, from 0 to `L / sqrt(2)`, so nothing is dropped.

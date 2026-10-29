@@ -4,11 +4,12 @@ Every test split that is not an exact draw of a closed-form density is generated
 `gen/`, then published to the Hugging Face dataset `h2o64/samplingdb`, from which `test_samples()`
 downloads it (see [Data and cache](interface.md#data-and-cache)). Those scripts are maintainer
 tooling: they are not installed with the package and nothing under `samplingdb/` imports them,
-which keeps CmdStan and the samplers out of the install. Each one writes its set into the cache as `<folder>/<name>_<spec_id>.npy`, the
-path `test_samples()` reads, next to a manifest (`<name>_<spec_id>_manifest.json`: the target, its
-`spec_id`, the full protocol, the diagnostics and the sha256 of the array), and only after the set
-passes its acceptance gates. Every run is reproducible from its seed, and every set is stored
-interleaved so that its first `n` rows span every chain.
+which keeps CmdStan and the samplers out of the install. Each one writes its set into the cache as
+`<folder>/<name>_<spec_id>.npy`, the path `test_samples()` reads, next to a manifest
+(`<name>_<spec_id>_manifest.json`: the target, its `spec_id`, the full protocol, the diagnostics and
+the sha256 of the array), and only after the set passes its acceptance gates. Every run is
+reproducible from its seed, and every set is stored interleaved so that its first `n` rows span
+every chain.
 
 | Targets | Generator | Sampler | Cache folder |
 | --- | --- | --- | --- |
@@ -21,11 +22,11 @@ interleaved so that its first `n` rows span every chain.
 ## The samplers
 
 The samplers behind the sets live in `gen/` with the generators: `gen/nrpt.py` (non-reversible
-parallel tempering, its explorers and references, HMC), `gen/md/dynamics.py` (the batched Langevin
-integrator and the solute split of the peptides) and `gen/diagnostics.py` (integrated
-autocorrelation time, effective sample size, the spread of the chain means). The Metropolis kernels
-the train splits use are in `samplingdb/targets/kernels.py`, and `swap_monte_carlo` is in
-`samplingdb/targets/physics.py`, since the glass's train split is its displacement-only chain.
+parallel tempering, its explorers and references, HMC), `gen/md/dynamics.py` (the solute split of
+the peptides, and the peptide wrapper of the Langevin integrator) and `gen/diagnostics.py`
+(integrated autocorrelation time, effective sample size, the spread of the chain means). The
+kernels the train splits also use are in `samplingdb/targets/kernels.py` (Metropolis, MALA, the
+batched BAOAB Langevin integrator), and `swap_monte_carlo` is in `samplingdb/targets/physics.py`.
 
 `non_reversible_parallel_tempering(log_prob, score, x0, beta, explorer=None, n_rounds=10,
 reference=None, ...)` is the scheme of Syed et al. 2022 (JRSS-B, Algorithms 1 to 4), the one
@@ -44,10 +45,11 @@ Pigeons.jl implements.
   calibrated ladder is reused across shards.
 
 The local kernel comes from an explorer factory: `hmc_explorer`, or `dynamics_explorer`, which
-wraps a molecular-dynamics integrator and carries velocities from one scan to the next. With `reference=None` the path is `beta * log_prob`;
-otherwise the `beta = 0` end is a `GaussianReference` (normalised, so the stepping stone gives
-`log Z`) or a `PotentialReference`, a sub-potential of the target, which tempers only the rest of
-it: solute tempering (Wang, Friesner and Berne 2011; Kamiya and Sugita 2018).
+wraps a molecular-dynamics integrator and carries velocities from one scan to the next. With
+`reference=None` the path is `beta * log_prob`; otherwise the `beta = 0` end is a
+`GaussianReference` (normalised, so the stepping stone gives `log Z`) or a `PotentialReference`, a
+sub-potential of the target, which tempers only the rest of it: solute tempering (Wang, Friesner and
+Berne 2011; Kamiya and Sugita 2018).
 `return_diagnostics=True` returns the tuned schedule and step sizes, the global barrier `Lambda`,
 the rejection rate per pair of levels, the acceptance per level and chain, the round trips per
 chain, the stepping-stone `log_normaliser` and the final state.
@@ -121,13 +123,10 @@ LJ-55 starts at `beta_min = 0.5` because its target temperature `T* = 0.5` is al
 cluster's melting point (0.294): hotter levels would spend most of the barrier on a dilute gas.
 
 The binary glass at T = 0.2 is the slowest set and the smallest: 30 720 configurations, 15 from
-each of 2 048 ladders. Its ladder is ten
-levels geometric in T from 0.6 to 0.2. The calibration keeps that schedule and tunes only the step
-sizes: Λ = 4.60, swap rejections 0.49 to 0.52, one round trip per ~860 scans. A ladder reaching
-T = 2.0 does not converge: replicas that crystallise get trapped between T = 0.4 and 0.9 and hold
-the T = 0.2 level a third of the time. The ten-level ladder from T = 0.6 does converge, from deep
-and from melted starts alike, but its slowest observables, the mean and median pair distance, need
-about 300 000 scans of burn-in and a spacing of about 300 000 scans for the merged set to be 90%
+each of 2 048 ladders. Its ladder is ten levels geometric in T from 0.6 to 0.2. The calibration
+keeps that schedule and tunes only the step sizes: Λ = 4.60, swap rejections 0.49 to 0.52, one
+round trip per ~860 scans. The slowest observables, the mean and median pair distance, need about
+300 000 scans of burn-in and a spacing of about 300 000 scans for the merged set to be 90%
 independent. Half the shards start from deep configurations of an earlier run (`--start`) and half
 from the melt, so the merge's start-agreement gate tests the convergence directly. The published
 set keeps one state every 458 752 scans (28 stored states of 16 384) after 294 912 scans of
@@ -152,9 +151,6 @@ independent. A shard skips that last check and leaves it to the merge: one shard
 too noisy to gate on, and a shard that failed it would lose its states. Independence is measured
 on the energy, the mean pair distance and the 10%, 50% and 90% quantiles of the sorted pair
 distances.
-
-This generator is not used for the peptides: HMC with unit masses on Cartesian coordinates lets the
-bond vibrations set the step size, and the conformation does not move.
 
 ## Replica-exchange MD: peptides
 
@@ -214,9 +210,8 @@ python gen/merge_shards.py --target ka-ternary-N44-T1.0 --folder swapmc --min_sa
 The structural relaxation time read off the trajectories, following each particle through the
 swaps, is about 2 300 time units at T = 0.32 and 265 at T = 1.0. The merge gates the set as for
 parallel tempering, on the energy and the pair distances, and the shard's manifest records the
-specific heat `c_V = Var(E) / (N T^2)` of each half of the stored states: c_V needs independent
-configurations rather than merely equilibrated ones (Jung et al. 2024), so the two halves must
-agree.
+specific heat `c_V = Var(E) / (N T^2)` of each half of the stored states: c_V converges only on
+independent configurations (Jung et al. 2024), so the two halves must agree.
 
 ## Stan posteriors
 
@@ -241,7 +236,7 @@ constant included, at eight random points, and stops if they differ by more than
 Nothing is written unless the largest R-hat is below 1.01, the smallest bulk ESS is above 90% of
 the kept draws, and there are no divergent transitions. The draws are shuffled with a seeded
 permutation, so the first `n` rows span every chain. The direct LGCP parameterisation is the slow
-one: its run took 29 hours on one machine, against 30 minutes for the whitened one.
+one: its run takes 29 hours on one machine, against 30 minutes for the whitened one.
 
 ## Exact sampler: Brownian motion
 
@@ -257,13 +252,13 @@ every proposal is checked against the bound.
 python gen/exact/brownian.py
 ```
 
-NUTS under-samples this posterior where the data stop constraining the observation scale. The Stan
-set it replaces passed R-hat and ESS with no divergences, yet read a standard deviation of 0.4264 on
-`log alpha_obs` against the exact 0.4675, and put 0.069% of its mass below -5 against 0.345%.
 ## Publishing
 
 The sets are published to the Hugging Face dataset `h2o64/samplingdb`, laid out like the cache:
 `pt/`, `md/`, `stan/`, `exact/` and `swapmc/`, each array next to its manifest, with a dataset card.
+The same release holds the default train split of every target under `train/`, written on a GPU by
+`gen/train/generate.py` and named `<name>_<spec_id>_<recipe>.npy`, so a changed recipe is a new
+file.
 The library pins two things in `samplingdb/data.py`: `REFERENCE_REVISION`, the tag it reads, and
 `REFERENCE_CHECKSUMS`, the sha256 of every file published at that tag. A tag is never moved, so
 every version of the library keeps reading the bytes it was tested against.
@@ -280,12 +275,11 @@ every version of the library keeps reading the bytes it was tested against.
    `$SAMPLINGDB_CACHE/publish/<tag>/`.
 
 With `--upload` it then logs in to Hugging Face (asking for a write token the first time), creates
-the repo, commits each set with its manifest, commits the card and tags the
-release. An upload that stops partway resumes when rerun, since each set is its own commit and what
-is already there is skipped. A registered set whose bytes differ from the file on the main branch
-replaces it, with its manifest; the earlier tags keep serving the old file. When the tag exists
-already, it is checked and left where it is, and only what the main branch lacks, such as a newer
-card, is added. Last, it
+the repo, commits each set with its manifest, commits the card and tags the release. An upload that
+stops partway resumes when rerun, since each set is its own commit and what is already there is
+skipped. A registered set whose bytes differ from the file on the main branch replaces it, with its
+manifest; the earlier tags keep serving the old file. When the tag exists already, it is checked
+and left where it is, and only what the main branch lacks, such as a newer card, is added. Last, it
 checks the tag against the registry and downloads the smallest set through the library's own code
 into an empty cache. `--check_release` runs only that last check.
 
@@ -338,9 +332,9 @@ Choosing a ladder for a new target:
 ## OpenMM check
 
 `gen/openmm_check/compare.py` checks `TorchForceField` against OpenMM's `Reference` platform force
-group by force group, in float64 on frames of the reference set, and stops unless the largest energy error is
-within 1e-6 of the rms energy and the largest force error within 1e-4 of the rms force component;
-on 256 frames of each peptide the worst are 9e-8 and 2e-8. It then checks that the score has a
-finite second derivative, and times the batched float32 torch path against every OpenMM platform. `openmm_bridge.py` is the one-configuration-at-a-time
-OpenMM evaluator kept as the comparison reference. The CUDA platform installs with
-`pip install "openmm[cuda13]"`.
+group by force group, in float64 on frames of the reference set, and stops unless the largest
+energy error is within 1e-6 of the rms energy and the largest force error within 1e-4 of the rms
+force component; on 256 frames of each peptide the worst are 9e-8 and 2e-8. It then checks that the
+score has a finite second derivative, and times the batched float32 torch path against every OpenMM
+platform. `openmm_bridge.py` is the one-configuration-at-a-time OpenMM evaluator it compares
+against. The CUDA platform installs with `pip install "openmm[cuda13]"`.

@@ -30,7 +30,7 @@ from samplingdb import build, catalog
 print(catalog())                        # every target, under the name it is cited by
 target = build('gmm40')
 
-train = target.train_samples(n=2048)    # cheap and biased: one short chain per mode
+train = target.train_samples(n=2048)    # cheap and biased: every mode, wrong proportions
 test = target.test_samples(n=2048)      # exact draws
 
 # Any sampler: here unadjusted Langevin on the analytic score

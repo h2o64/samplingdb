@@ -8,7 +8,8 @@ buffers.
 | `log_prob(x)` | log of the unnormalised density, shape `(n,)` |
 | `score(x)` | its gradient, shape `(n, dim)` |
 | `log_prob_and_grad(x)` | both, sharing work where the target can |
-| `train_samples(n=None)` | the cheap, biased split |
+| `train_samples(n=None, seed=0)` | the cheap, biased split: the published one by default, otherwise generated and cached |
+| `generate_train_samples(n, seed=0, x0=None, ...)` | the same recipe, uncached, every knob exposed |
 | `test_samples(n=None)` | the reference split |
 | `compute_metrics(samples, weights=None, ...)` | the metric panel, see [Metrics](metrics.md) |
 | `preprocess(x)` | the representation the metrics compare in |
@@ -47,24 +48,29 @@ inside `TorchForceField` with `chunk_size`.
 
 `target.to('cuda')` moves the density. `compute_metrics` casts the samples, the weights and the
 reference to the target's dtype and device before scoring them, so the panel runs where the target
-is. A train split is generated on the CPU whatever the target's device, so it is the same array on
-every machine, and it is returned on the target's device.
+is. The default train split is published, so it is the same array on every machine. Any other
+train split is generated on the target's device, so the expensive recipes run on a GPU when the
+target is on one. torch draws a different random stream on a GPU than on the CPU, so one seed gives
+one array per device type, and the cache key carries the device type. On a GPU the peptides also
+differ between two runs of one seed, because their compiled force sums with atomic adds: the cache
+keeps the first run.
 
 ## Working dtype
 
 The particle clusters, the glass formers and the peptides work in float32: on real configurations
 their energies agree with float64 to about 1e-4 kT, and they run 2x to 11x faster. The synthetic
-targets and the posteriors stay in float64, because their exactness checks (analytic score against
+targets and the posteriors work in float64, because their exactness checks (analytic score against
 autograd) are not precision-tolerant. Every constructor takes `dtype`.
 
 ## Names, specifications and the cache
 
 `name` is a short lowercase identifier that carries only what changes the density, with no version
 tag: `lj13`, `ka-binary-N64-T0.2`, `lgcp-whitened`. `spec()` returns every value that defines the
-density, `spec_id` hashes it, and the cached train split is keyed by name, `spec_id`, working dtype
-and `n`, so a changed constant is a cache miss rather than a stale array. The reference set is keyed
-by `reference_key()`, `<name>_<spec_id>`, with no dtype: the constants are hashed at the same
-precision whatever the working dtype, so a float32 and a float64 build read the same reference set.
+density, `spec_id` hashes it, and the cached train split is keyed by name, `spec_id`, working dtype,
+device type, `train_recipe`, seed and `n`, so a changed constant or recipe is a cache miss rather
+than a stale array. The reference set is keyed by `reference_key()`, `<name>_<spec_id>`, with no
+dtype: the constants are hashed at the same precision whatever the working dtype, so a float32 and
+a float64 build read the same reference set.
 A new constructor argument that moves `log_prob` must appear in that target's `spec()`.
 
 ## The catalog
@@ -89,10 +95,10 @@ a subclass.
 | `SAMPLINGDB_CACHE` | where downloads, train splits and reference sets live (default `~/.cache/samplingdb`) |
 | `SAMPLINGDB_DATA_DIR` | a directory of local copies, used by file name instead of downloading; checksums are still verified |
 
-The reference set behind `test_samples()` downloads itself. The first call fetches the published
-set from the Hugging Face dataset [`h2o64/samplingdb`](https://huggingface.co/datasets/h2o64/samplingdb),
-checks its sha256, and saves it in the cache; every later call reads the cache. Nothing needs an
-account or a token.
+The reference set behind `test_samples()` and the default split behind `train_samples()` download
+themselves. The first call fetches the published file from the Hugging Face dataset
+[`h2o64/samplingdb`](https://huggingface.co/datasets/h2o64/samplingdb), checks its sha256, and
+saves it in the cache; every later call reads the cache. Nothing needs an account or a token.
 
 ```python
 from samplingdb import build
@@ -102,16 +108,16 @@ x = target.test_samples(n=10000)    # Downloading pt/lj55_01c56181.npy ..., once
 target.reference_path()             # where it now sits in the cache
 ```
 
-The sets take 3.1 GB together, of which the two LGCP posteriors are 1.3 GB each; the others run
-from 3 MB to 76 MB. To fetch them ahead of time, for instance on a login node before a job runs
-where there is no internet access, call `download_references`. It skips whatever is already
-cached:
+The reference sets take 3.1 GB together and the train splits 3.2 GB, of which the two LGCP
+posteriors are 1.3 GB each in both; the others run from a few MB to 76 MB. To fetch them ahead of
+time, for instance on a login node before a job runs where there is no internet access, call
+`download_references`. It skips whatever is already cached:
 
 ```python
 import samplingdb
 
-samplingdb.download_references(['lj55', 'ace-a-nme-T300'])    # by catalog name
-samplingdb.download_references()                    # every published set
+samplingdb.download_references(['lj55', 'ace-a-nme-T300'])    # both splits, by catalog name
+samplingdb.download_references()                    # every published file
 ```
 
 The cache is laid out like the dataset repo (`pt/`, `md/`, `stan/`, `exact/`, `swapmc/`), so a copy
@@ -128,8 +134,9 @@ at another tag raises an error naming the file to delete. A set generated locall
 in `gen/` lands in the same place and, until it is published, is read before anything is
 downloaded; see [Reference sets](reference-sets.md).
 
-A target whose set is neither cached nor published raises a `FileNotFoundError` that says where it looked and names the command producing the set. Asking for
-more rows than a set holds raises a `ValueError` naming the command for a larger one.
+A target whose set is neither cached nor published raises a `FileNotFoundError` that says where it
+looked and names the command producing the set. Asking for more rows than a set holds raises a
+`ValueError` naming the command for a larger one.
 
 Third-party inputs are fetched from whoever published them, each pinned to a commit and a sha256:
 the Tier 2 datasets from `DenisBless/variational_sampling_methods` on GitHub, and the peptide

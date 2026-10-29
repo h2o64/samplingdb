@@ -25,9 +25,10 @@ Every input file is read at a pinned revision of that dataset and checked agains
   <img alt="One test structure of each of the four peptides" src="../figures/images/peptides_molecules_light.png">
 </picture>
 
-One structure from each test split, drawn at the same scale. On Ace-A-Nme the two bonds the panel's
-torsions turn about are marked: phi about N-Calpha and psi about Calpha-C. Ace-A-Nme's panel reads
-`phi1` and `psi1` only; the longer peptides add one phi, psi and omega per residue.
+One structure from each test split, the one of median radius of gyration, drawn at the same scale.
+On Ace-A-Nme the two bonds the panel's torsions turn about are marked: phi about N-Calpha and psi
+about Calpha-C. Ace-A-Nme's panel reads `phi1` and `psi1` only; the longer peptides add one phi,
+psi and omega per residue.
 
 ## The energy
 
@@ -78,13 +79,13 @@ with each other has no mirror image in the reference and is scored as it is.
 </picture>
 
 A test structure of Ace-A-Nme and its mirror image, seen down the bond from the alpha carbon to the
-carbonyl carbon. Both have an energy of -29.82 kT. Seen this way the bonds to N, H alpha and C beta
-turn clockwise in the reference and counterclockwise in the mirror image, and the triple product of
-the three bond vectors, which the panel reads, goes from -1 to +1. A sample of the mirror
+carbonyl carbon. The two have the same energy. Seen this way the bonds to N, H alpha and C beta
+turn clockwise in the test structure and counterclockwise in the mirror image, and the triple product
+of the three bond vectors, which the panel reads, changes sign. A sample of the mirror
 handedness is mirrored back before scoring, and `correct_chirality_rate` is the fraction that did
 not need it.
 
-The last row reproduces `transferable-samplers`' metrics in batched torch and was checked against
+The `transferable-samplers` row reproduces their metrics in batched torch and is checked against
 their implementation: `energy_w1`, `energy_w2` and `tica_w2` agree to 1e-12, `torus_w2` and the TICA
 features to 1e-7, and the k-means divergences fall inside scikit-learn's own seed spread.
 `compute_upstream_metrics` returns that panel alone. `torus_w2`, `tica_w2` and `tica_k_jsd` run on
@@ -113,29 +114,33 @@ energy distances and `torus_k_jsd` use every sample with its weight.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../figures/images/peptides_ramachandran_dark.png">
-  <img alt="Ramachandran density of the Ace-A-Nme test split with the torsion marginals of both splits, and the 32 x 32 cells js_ramachandran scores" src="../figures/images/peptides_ramachandran_light.png">
+  <img alt="Ramachandran densities of the Ace-A-Nme test and train splits, with the torsion marginals of both" src="../figures/images/peptides_ramachandran_light.png">
 </picture>
 
-Ace-A-Nme's train split, 2 000 frames, scored against the first 2 000 test structures. Left: the
-density of the whole test split in ten levels, each a tenth of its peak, with the phi and psi
-marginals of both splits on 128 bins, twice as fine as the 64 that `kl_phi1` and `kl_psi1` use.
-Alpha-L holds 1.3% of the structures and stays below the first level. Right: the 32 x 32 cells of
-`js_ramachandran`, the shaded ones being the 20% that the test rows fill
-(`ramachandran_occupancy`) and the dots the train split's mass. The train split is closer on phi (`kl_phi1` 0.28) than on psi (`kl_psi1` 7.95),
-because it holds no alpha-R structure.
+Ace-A-Nme's two splits, every frame of each. The two planes are the Ramachandran densities of the
+test split and of the train split, each in ten levels of its own peak and labelled with the share
+of each backbone basin, counting alpha-R as phi < 0 and -125 < psi < 50 degrees and alpha-L as
+phi > 0. Above and to the right are the phi and psi marginals of both splits, which `kl_phi1`,
+`w1_phi1`, `kl_psi1` and `w1_psi1` compare, on bins finer than the panel's. The train split places
+most of its frames in alpha-L, which the test split barely visits, so the test density stays below
+its first level there and the train density peaks. Beta and PII, the test split's largest basin,
+fall below the first level of the train density, and the phi marginal puts the bulk of the two
+splits on opposite sides of phi = 0.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../figures/images/peptides_tica_dark.png">
   <img alt="TICA density of the Ace-A-Nme test split with the marginals of both splits, the k-means centres and one structure per backbone basin" src="../figures/images/peptides_tica_light.png">
 </picture>
 
-The TICA plane of the upstream panel on the same two sets: the density of the whole test split, in
-which the alpha-L island near TIC 1 = -6 stays below the first level, the marginals of both splits, the 20 k-means centres of `tica_k_jsd`, and the test structure
-nearest the median of each backbone basin. TIC 1 spreads 100 times wider than TIC 2, so the
-k-means cells, fitted in these coordinates as the panel fits them, are bands across TIC 1: 99.9% of
-the plane's columns lie in a single cell, and the top marginal draws the cell borders. Alpha-R and
-beta separate along TIC 2, which the cells barely resolve, and the train split, which has no alpha-R
-structure, reads `tica_k_jsd` 0.026 and `tica_w2` 0.45.
+The TICA plane of the upstream panel on the same two splits: the density of the test split, the
+marginals of both splits, the k-means centres of `tica_k_jsd`, and the test structure nearest the
+median of each backbone basin. The centres are fitted as the panel fits them, on its subsample of
+the test split (`max_ot_samples` rows); everything else uses every frame. TIC 1 spreads far wider
+than TIC 2, so the cells are bands across TIC 1, and the top marginal draws their borders. Alpha-R
+and beta separate along TIC 2, which the cells barely resolve. Alpha-L is the island on the left,
+below the first level of the test density. The TIC 1 marginal shows the train split's frames
+gathered there, and on TIC 2 the train marginal peaks between the test split's alpha-R and beta
+peaks.
 
 ## Splits
 
@@ -143,21 +148,22 @@ structure, reads `tica_k_jsd` 0.026 and `tica_w2` 0.45.
 | --- | --- |
 | test | This library's replica-exchange molecular dynamics with solute tempering, `gen/md/generate.py`, published as `md/<name>_<spec_id>.npy` and downloaded on first use: 100 000 structures. Its integrator is unadjusted BAOAB at 1 fs, which puts the mean energy about 0.1 kT above the exact law (measured on Ace-A-Nme). See [Reference sets](../reference-sets.md#replica-exchange-md-peptides). |
 | `load_split('train' \| 'val' \| 'test')` | The released SBG frames, centred on load. The TICA projection is fitted on the test split; they are not a reference set. |
-| train | The pretraining protocol of Nam et al. 2025: 100 ps of Langevin dynamics at the system's temperature and friction, 1 fs timestep, from the minimised released structure. It is one trajectory, so `n` sets the stride between kept frames. |
+| train | 1000 Langevin trajectories (BAOAB, the system's friction, 1 fs) from the minimised released structure, each residue placed in a backbone basin: beta/PII, alpha-R or alpha-L with shares 7%, 22% and 71%, its phi and psi rotated to the basin's centre. A short descent and 2 ps of dynamics with the torsions restrained relax the rotation, then trajectory `i` runs free at the system's temperature times a factor running geometrically from 0.6 to 1.25 with `i`: 10 ps, then one frame every 50 fs. Alpha-L holds 60% to 70% of every residue against at most 3% in the test splits, inside a basin the shape is the target's, and every test energy lies inside the train range. |
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../figures/images/peptides_trajectory_dark.gif">
-  <img alt="The 100 ps Ace-A-Nme train trajectory and its backbone angles over the test split density" src="../figures/images/peptides_trajectory_light.gif">
+  <img alt="Three Ace-A-Nme train trajectories, one per backbone basin, and their backbone angles over the test split density" src="../figures/images/peptides_trajectory_light.gif">
 </picture>
 
-Ace-A-Nme's train split played back, one frame every 0.5 ps over its 100 ps, superposed on the
-backbone, next to its (phi, psi) over the density of the test split. Every frame stays in the
-beta and PII region; counting alpha-R as phi < 0 and -125 < psi < 50 degrees and alpha-L as phi > 0,
-the test split puts 41% of its structures in alpha-R and 1.3% in alpha-L.
-
-The test split is this library's own because the released splits are far from independent: their
-integrated autocorrelation times range from 4.3 stored frames on `AAA` to 60.7 on `Ace-AAA-Nme`,
-whose 580 000-frame test split is worth about 9 600 independent structures.
+Three trajectories of Ace-A-Nme's train split played back frame by frame, one per backbone basin,
+each superposed on the backbone of its first frame, next to their (phi, psi) over the density of
+the test split. Every trajectory of the recipe starts from the energy-minimised released structure
+with each residue's phi and psi rotated to the centre of a basin drawn for it, alpha-L most often
+and beta least. A restrained descent and a short restrained Langevin run relax the rotation, the
+restraint is released, and the trajectory runs free at its own temperature, the temperatures
+spread from below to above the system's, before its frames are kept. These three are the ones
+nearest the system's temperature, and the clock counts from the release. Each stays in its basin
+for nearly every frame, so the basin proportions of the train split follow the draw.
 
 About the released files: the train split is mean-centred and val and test are not, which
 `load_split` corrects.
