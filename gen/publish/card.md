@@ -15,6 +15,8 @@ viewer: false
 
 # samplingdb reference sets
 
+![The samplingdb catalog, one tile per target](https://huggingface.co/datasets/{{repo}}/resolve/main/banner.png)
+
 Reference samples for the targets of [samplingdb](https://github.com/h2o64/samplingdb), a PyTorch
 library of unnormalised densities for benchmarking samplers. A sampler's output is scored against
 these sets. Each one comes from a long Markov chain run on the target's own density (MCMC, or

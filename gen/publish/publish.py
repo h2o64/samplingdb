@@ -9,8 +9,11 @@ from samplingdb.data import (REFERENCE_CHECKSUMS, REFERENCE_REPO, REFERENCE_REVI
                              sha256)
 from samplingdb.targets import spec_id
 
-# The dataset card's template, which this script fills with the table of files
+# The dataset card's template, which this script fills with the table of files, and the catalog
+# banner it shows, the light variant of the README's
 CARD = pathlib.Path(__file__).resolve().parent / 'card.md'
+BANNER = pathlib.Path(__file__).resolve().parents[2] / 'docs' / 'figures' / 'images' \
+    / 'banner_light.png'
 
 # Parse the arguments
 parser = argparse.ArgumentParser(
@@ -274,7 +277,7 @@ api.create_repo(REFERENCE_REPO, repo_type='dataset', private=False, exist_ok=Tru
 # was cut at, so a set regenerated for a new release replaces the file on main, with its manifest,
 # while the older tags keep serving theirs; a cache filled at an older tag is
 # caught by data.verify_once. An existing tag was checked above and is never moved
-wanted = [row['file'] for row in rows] + ['README.md']
+wanted = [row['file'] for row in rows] + ['README.md', 'banner.png']
 present = {info.path: info for info in api.get_paths_info(REFERENCE_REPO, wanted,
                                                           repo_type='dataset')}
 for row in rows:
@@ -290,11 +293,14 @@ for row in rows:
                                   CommitOperationAdd(file[:-len('.npy')] + '_manifest.json',
                                                      str(row['manifest']))])
 card_id = git_blob_id(folder / 'README.md')
-if 'README.md' not in present or present['README.md'].blob_id != card_id:
+banner = present.get('banner.png')
+if 'README.md' not in present or present['README.md'].blob_id != card_id or banner is None \
+        or banner.lfs is None or banner.lfs.sha256 != sha256(BANNER):
     api.create_commit(REFERENCE_REPO, repo_type='dataset',
                       commit_message='Write the dataset card of ' + REFERENCE_REVISION,
-                      operations=[CommitOperationAdd('README.md', str(folder / 'README.md'))])
-    print('  README.md                                    the dataset card')
+                      operations=[CommitOperationAdd('README.md', str(folder / 'README.md')),
+                                  CommitOperationAdd('banner.png', str(BANNER))])
+    print('  README.md, banner.png                        the dataset card and its banner')
 if not tagged:
     api.create_tag(REFERENCE_REPO, tag=REFERENCE_REVISION, repo_type='dataset',
                    tag_message='samplingdb reference sets ' + REFERENCE_REVISION)
