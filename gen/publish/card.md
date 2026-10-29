@@ -128,6 +128,7 @@ changes its bytes under a new tag; samplingdb refuses a cached copy from another
 | `v2` | the Brownian posterior from an exact sampler, under `exact/` in place of `stan/`; both ternary glass sets regenerated on the GPU; the three particle sets, unchanged, under new names, since the particle count joined their `spec_id`; the binary Kob-Andersen glass at T = 0.2, published for the first time; every set under the MIT License, in place of CC BY 4.0 |
 | `v3` | the default train split of every target, under `train/`; the reference sets of `v2`, unchanged |
 | `v4` | the train splits of the particle systems and the glasses, with most chains far hotter than the target; everything else as in `v3` |
+| `v5` | the train splits of LJ-13 and LJ-55, with nine chains in ten at one temperature above the target's and one in ten from 0.8 to 1 times it; everything else as in `v4` |
 
 ## License and attribution
 
