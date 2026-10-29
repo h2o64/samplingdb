@@ -15,7 +15,8 @@ viewer: false
 
 # samplingdb reference sets
 
-![The samplingdb catalog, one tile per target](https://huggingface.co/datasets/{{repo}}/resolve/main/banner.png)
+<img class="dark:hidden" src="https://huggingface.co/datasets/{{repo}}/resolve/main/banner_light.png" alt="The samplingdb catalog, one tile per target" />
+<img class="hidden dark:block" src="https://huggingface.co/datasets/{{repo}}/resolve/main/banner_dark.png" alt="The samplingdb catalog, one tile per target" />
 
 Reference samples for the targets of [samplingdb](https://github.com/h2o64/samplingdb), a PyTorch
 library of unnormalised densities for benchmarking samplers. A sampler's output is scored against
