@@ -38,7 +38,7 @@ on an exact sampler, each with the metrics its own literature reports), Tier 3 (
 through one Peptide class and the batched torch force field, on our own replica-exchange MD
 references), Tier 4 (both Kob-Andersen systems: the swap-friendly ternary on our own GPU swap Monte
 Carlo, and the binary of Cheng et al. 2026 on our own non-reversible parallel tempering), the
-metrics package, 629 tests.
+metrics package, 650 tests.
 
 Not yet built: the adjoint-sampling / GEOM drug-like molecules; phi^4 and the rest of Tier 4.
 
@@ -60,7 +60,7 @@ modules (ABI mismatch):
 
 ```sh
 ./venv/bin/pip install -e ".[dev,molecular]"
-./venv/bin/python -m pytest tests -q  # 629 tests, ~5 min with the reference sets cached and a GPU
+./venv/bin/python -m pytest tests -q  # 650 tests, ~5 min with the reference sets cached and a GPU
 ./venv/bin/python examples/quickstart.py
 ./venv/bin/pip install -e ".[docs]"   # matplotlib and PyMOL, only to redraw docs/figures
 ./venv/bin/python docs/figures/synthetic.py  # one script per page, plus hero.py for the banner
@@ -80,10 +80,13 @@ samplingdb/
     weights.py       normalize_weights, and subsample for the rows the quadratic metrics use
     standard.py      the target-agnostic panel, linear half always and quadratic half opt-in
   targets/
-    base.py          Target, ExactTarget, spec_id, score_autograd (test-only)
-    kernels.py       run_chains, metropolis, random_walk_mh, mala, student_t2 -- the train recipes'
-                     kernels, vectorised over chains, and nothing else
-    modes.py         ModeCoverage: the mode-weight panel every mode-descriptor target reports
+    base.py          Target, ExactTarget, spec_id, the train layout (cycle, chain_layout,
+                     interleave), score_autograd (test-only)
+    kernels.py       run_chains, metropolis, random_walk_mh, mala, tempered_mala, temperature_ladder,
+                     langevin, steepest_descent, student_t2 -- the train recipes' kernels,
+                     vectorised over chains, and nothing else
+    modes.py         ModeCoverage: the mode-weight panel every mode-descriptor target reports, and
+                     their train recipe, skewed_allocation over the modes
     catalog.py       CATALOG, build, catalog, download_references -- one name per target
     mixtures.py      Mixture, MOG, GMM40, MoS, TwoModes, BracketTwoModes, ManyModes,
                      EightGaussians
@@ -94,7 +97,8 @@ samplingdb/
     physics.py       PeriodicPairMixture, KobAndersen2D, KobAndersenBinary, swap_monte_carlo
     molecular.py     Peptide, PEPTIDE_SYSTEMS, SBG_REVISION, SBG_CHECKSUMS -- one class, four
                      catalog entries
-    forcefield.py    TorchForceField, extract_parameters, linlogcut -- openmm imported lazily
+    forcefield.py    TorchForceField, extract_parameters, linlogcut, RECOMPILE_LIMIT -- openmm
+                     imported lazily
   data.py            cache dir, sha256, verify_once, fetch_url, fetch_hf (pinned revision and
                      sha256), cached_local, and the published reference sets: REFERENCE_REPO,
                      REFERENCE_REVISION, REFERENCE_CHECKSUMS, fetch_reference
@@ -108,10 +112,11 @@ gen/                 maintainer-only, NOT part of the package's import graph
   swap_mc/           generate.py, the ternary glass's compiled GPU swap Monte Carlo driver
   parallel_tempering/ generate.py, the Tier 1 and binary-glass reference driver
   md/                generate.py, replica-exchange MD with solute tempering for the peptides, and
-                     dynamics.py, the batched BAOAB integrator and the solute split
+                     dynamics.py, the solute split and the peptide wrapper of kernels.langevin
   merge_shards.py    checks every shard's spec_id and ladder gates, concatenates the shards of one
                      run and re-audits the merged set
   audit/             barrier.py, decorrelation.py, stationarity.py -- what a set is worth
+  train/             generate.py, the published default train split of every target
   publish/           publish.py and the dataset card: checks the sets against the code, uploads
                      them to the Hugging Face dataset and tags the release
   openmm_check/      the retired OpenMMBridge, and compare.py, which asserts float64 agreement with
@@ -206,21 +211,29 @@ it is checked here.
     from independent reimplementations and were verified by execution. If one fails the
     implementation is wrong, unless the tolerance reflects a rounding in the *published* constant
     (0.8443 is a 4-digit rounding of the true well mass) — say which.
-11. **Every host-generated `train_samples()` states its sampler, step size, step count and fixed
-    starting point in its docstring, and is reproducible from a fixed seed.** If a recipe's actual
-    behaviour differs from what was predicted, fix the docstring to describe reality (the
-    mixtures' does: on equal weights one chain per mode is stratified sampling, so GMM-40's mode
-    weights come out right and only its mode-to-mode dynamics are missing). Its kernel comes from
-    `targets/kernels.py`; a recipe that needs a new kernel adds it there. The recipe runs on the
-    CPU whatever the target's device (`Target.train_samples` moves it), so a seeded split is one
-    array on every machine.
+11. **A train split covers what the test split covers and gets the rest wrong, and says how.**
+    On a target with modes every mode is visited, in proportions far from the true ones (an
+    allocation by true weight on equal weights is stratified sampling, which gives the proportions
+    away); on a unimodal target the shape is wrong; everywhere the train energies span the test
+    ones, both tails included. `tests/test_splits.py` holds each of those, so a recipe change that
+    breaks one fails there. Every `generate_train_samples` states its starts, kernel, step size,
+    step count and temperatures in its docstring, and what the split gets wrong, takes `n`, `seed`
+    and `x0` (chain `i` starts from `x0[i % len(x0)]`) and exposes every other knob as a keyword
+    argument. Measure a recipe at n = 10^5 against the test split before shipping it, and keep the
+    measurement out of the docstring. Its kernel comes from `targets/kernels.py`; a recipe that
+    needs a new kernel adds it there. The default split (`default_n` at seed 0) is published with
+    the reference sets as `train/<name>_<spec_id>_<recipe>.npy` (`gen/train/generate.py`, run on a
+    GPU), so every user reads the same array; any other size or seed runs on the target's device,
+    one array per device type (and, for the peptides on a GPU, one per run: their compiled force
+    is not bitwise repeatable). The cache key and the published name carry `train_recipe`, which
+    a changed recipe must bump.
 12. **Do not fabricate ground truth.** A target with no reference set raises a `FileNotFoundError`
     from `test_samples()` that names where it looked and the `gen/` command that makes the set.
     Where an exact marginal exists (Funnel's x₁, ManyWell's pooled quartic), score against **that**,
     not against a Monte-Carlo reference — it removes the noise from the reference side entirely.
 13. **A metric's grid must be justified against its own self-comparison floor.** Before shipping a
-    histogram divergence, score two halves of the reference ensemble against each other and record
-    that number in the docstring. The corpus's 200x200 Ramachandran grid fails this at realistic
+    histogram divergence, score two halves of the reference ensemble against each other, and keep
+    that comparison in a test. The corpus's 200x200 Ramachandran grid fails this at realistic
     sample sizes, which is why the divergences use a coarser grid and the plot-grade one is only
     returned. Where the floor is close to the signal, ship an occupancy diagnostic next to it.
 14. **When two reference implementations disagree on a convention, settle it against the released
@@ -247,8 +260,8 @@ it is checked here.
     panel is `transferable-samplers`' six scalars rewritten as batched torch, and it was accepted
     only after importing their originals and comparing: `energy_w1`/`energy_w2` and `tica_w2` agree
     to 1e-12, `torus_w2` and the TICA features to 1e-7 (mdtraj works in float32), and the two
-    k-means divergences land inside scikit-learn's own seed spread, which the `kmeans` docstring
-    quotes. Where an ordering is arbitrary but matters — the TICA feature columns are distances,
+    k-means divergences land inside scikit-learn's own seed spread, as the `kmeans` docstring
+    says. Where an ordering is arbitrary but matters — the TICA feature columns are distances,
     then sin/cos of phi, of psi, of omega — match theirs and version it (`TICA_LAYOUT` names the
     cached projections), because a permutation keeps the shape and nothing downstream would
     complain. Same-shape-different-numbers is the failure mode to design against.
@@ -276,9 +289,10 @@ carries an O(1/n) bias.
 Docstrings here carry one extra duty: **the provenance of every constant**. A pinned number without
 a citation or a named reference implementation is not finished work.
 
-`README.md` stays a short introduction, and the pages under `docs/` state what the library does and
-the decision behind it, not how it got there. A measurement that settled a convention, or an
-alternative that was rejected, belongs in the docstring or the test that keeps it settled.
+`README.md` stays a short introduction, and the pages under `docs/`, the docstrings and the comments
+state what the library does, how to use it and the decision behind it, not how it got there: no
+measured tables, no timings beyond what a user needs to plan a run, no rejected alternatives. A
+measurement that settled a convention belongs in the test that keeps it settled.
 
 Every image in the docs is drawn by a script under `docs/figures/` from the library itself
 (`build`, both splits, `compute_metrics(..., return_hist=True)`), so a number on a figure is the
