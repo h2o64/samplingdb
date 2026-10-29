@@ -11,12 +11,14 @@ the test split covers and gets the rest wrong:
 
 The default train split, 100 000 samples at seed 0, is published with the reference sets and
 downloaded on first use, so every user reads the same array. Any other size or seed is generated
-locally and cached, by the recipe its target's `generate_train_samples` docstring states. On the targets with modes each chain draws its mode with skewed shares, starts
-from an exact draw of that mode and takes a short random walk. The posteriors run chains at a
-ladder of temperatures either side of the target's. The particle systems run most of their chains
-far hotter than the target and a thin run of colder ones, so the train energies sit mostly above
-the test ones and only their low tail crosses them. The glasses do the same with displacements
-inside 100 basins made with swap moves on the ternary, the coldest basins taking the most chains.
+locally and cached, by the recipe its target's `generate_train_samples` docstring states.
+
+On the targets with modes each chain draws its mode with skewed shares, starts from an exact draw
+of that mode and takes a short random walk. The posteriors run chains at a ladder of temperatures
+either side of the target's. The particle systems run most of their chains hotter than the target
+and a tenth or a thin run of colder ones, so the train energies sit mostly above the test ones and
+only the colder chains cross them. The glasses do the same with displacements inside 100 basins
+made with swap moves on the ternary, the coldest basins taking the most chains.
 The peptides place every residue in a backbone basin, alpha-L the most often, and run Langevin
 dynamics from there.
 

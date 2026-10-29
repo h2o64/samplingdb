@@ -25,8 +25,8 @@ every pair sits in one of the two wells of the pair potential; the hot train cha
 pairs on the barrier between them. Bottom: for each cluster, the test configuration at the median
 test energy, then the last state of the coldest and of the hottest train chain, at one scale, each
 particle shaded by its number of neighbours within `1.4 r`, the first minimum of the pair
-distribution. The cold train states are compact and below the test energy; the hot ones, which
-hold most of the split, have come apart, far above it.
+distribution. The cold train states are compact and below the test energy; the hot ones, nine
+chains in ten, are looser and above it.
 
 ## Conventions
 
@@ -66,33 +66,33 @@ and 100 352 for LJ-55), from `compute_metrics(train, ref_samples=test, return_hi
 bins half as wide as the panel's, each bin the share of all the samples it holds. The shaded bands
 lie outside the edges, where the panel drops mass without counting it in the total variation.
 `*_out_of_range` reports the dropped share of the scored samples, and the reference is cut the same
-way. Most of the train energies lie above the test ones, many past the panel's upper edge
-(`energy_out_of_range` 0.10 on DW-4, 0.53 on LJ-13 and 0.56 on LJ-55), and only the tail of the
-cold chains overlaps the test histogram, reaching just past its lowest energy. `energy_total_var`
-reads 0.67, 0.66 and 0.81 on what stays inside the edges. The pair distances spread wider too:
-the hot DW-4 chains fill the barrier between the two wells, and `dist_total_var` reads 0.33, 0.37
-and 0.14.
+way. On the clusters the train energies form two bumps: the hot nine chains in ten sit just above
+the test histogram, around -10 on LJ-13 and -225 on LJ-55, and the cold tenth overlaps it, reaching
+just past its lowest energy. On DW-4 the bulk lies above the test energies and the tail of its
+colder chains overlaps them. `energy_total_var` reads 0.67, 0.80 and 0.90 on DW-4, LJ-13 and LJ-55.
+The pair distances spread wider too: the hot DW-4 chains fill the barrier between the two wells,
+and `dist_total_var` reads 0.33, 0.26 and 0.09.
 
 ## Splits
 
 | Split | How it is built |
 | --- | --- |
 | test | This library's non-reversible parallel tempering, `gen/parallel_tempering/generate.py`, published as `pt/<name>_<spec_id>.npy` and downloaded on first use. See [Reference sets](../reference-sets.md#parallel-tempering-particles-and-the-binary-glass). |
-| train | 1000 MALA chains from a fixed lattice jittered by `N(0, 0.1^2)`, chain `i` at a temperature factor `low (high / low)^((i / 999)^0.5)`, from 0.8 to 3 on the clusters and from 0.5 to 20 on DW-4, so most chains run far hotter than the target and a thin run of colder ones reaches down to `low`. The step size of every chain adapts towards 57% acceptance over 1000 moves, after which each keeps one state every 10 moves. Returned frame by frame with the centre of mass removed, like the test split. The bulk of the train energies lies above the test ones, and only the tail of the colder chains overlaps them, reaching just past their lowest. |
+| train | 1000 MALA chains from a fixed lattice jittered by `N(0, 0.1^2)`, each at its own temperature factor. On the clusters, nine chains in ten run at 1.7 (LJ-13) or 1.6 (LJ-55) times the target temperature and one in ten from 0.8 to 1 times it. On DW-4, chain `i` runs at `0.5 * 40^((i / 999)^0.5)`, so most chains are far hotter than the target and a thin run of colder ones reaches down to 0.5. The step size of every chain adapts towards 57% acceptance over 1000 moves, after which each keeps one state every 10 moves. Returned frame by frame with the centre of mass removed, like the test split. The bulk of the train energies lies above the test ones, and only the colder chains overlap them, reaching just past their lowest. |
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../figures/images/particles_train_chain_dark.gif">
   <img alt="Three LJ-55 train chains, the coldest, the middle and the hottest of the ladder, over their adaptation and kept moves, next to their energies and both splits' energies" src="../figures/images/particles_train_chain_light.gif">
 </picture>
 
-Three of the 1000 chains behind the LJ-55 train split, the coldest, the middle and the hottest of the
-ladder, from the jittered lattice to their last kept state, drawn every 20 moves with particles
+Three of the 1000 chains behind the LJ-55 train split, at 0.8, 1 and 1.6 times the target
+temperature, from the jittered lattice to their last kept state, drawn every 20 moves with particles
 shaded by neighbour count as above. The shaded part of each trace is the step-size adaptation,
 which the split does not keep; after it, every tenth state is a row of the split. Beside each trace
 are the energies of both whole splits. Each chain starts far above the plotted range and settles at
-a level set by its temperature. Over their kept states the cold chain averages -363.5, below the
-test split's 1st percentile, while the middle and the hot one, at 1.55 and 3 times the
-temperature, average -128.8 and -30.6, above every test energy: most of the split sits there.
+a level set by its temperature. Over their kept states the coldest chain averages -363.5, below
+the test split's 1st percentile, the chain at the target temperature -317.9, inside the test
+histogram, and the hot one -192.2, above every test energy, where nine chains in ten sit.
 
 The test split is this library's own parallel-tempering set, stationary under each target's own
 kernel (see [Reference sets](../reference-sets.md)).

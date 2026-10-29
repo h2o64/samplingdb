@@ -8,14 +8,13 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, Normalize, to_rgb
 from samplingdb import build
 from samplingdb.targets.base import generator
-from samplingdb.targets.kernels import temperature_ladder
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from common import blank, legend, pymol_render, save, save_gif, start_pymol
 
 # Parse the arguments
 parser = argparse.ArgumentParser()
 parser.add_argument('--n_samples', type=int, default=None)
-parser.add_argument('--chains', type=int, nargs='+', default=[0, 500, 999])
+parser.add_argument('--chains', type=int, nargs='+', default=[0, 99, 999])
 parser.add_argument('--trace_every', type=int, default=10)
 parser.add_argument('--frame_every', type=int, default=20)
 parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
@@ -164,7 +163,7 @@ for name in ['dw4', 'lj13', 'lj55']:
 for entry in systems.values():
     n_kept = len(entry['train']) // N_CHAINS
     entry['last'] = (n_kept - 1) * N_CHAINS
-    entry['factors'] = temperature_ladder(N_CHAINS, entry['target'].train_temperatures).numpy()
+    entry['factors'] = entry['target'].train_factors(N_CHAINS).cpu().numpy()
 
 # Pick the first DW-4 test configurations and the last train state of chains spread over the ladder
 dw4 = systems['dw4']
