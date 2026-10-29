@@ -13,11 +13,11 @@ EPS = 1e-10
 def reference_edges(ref_values, n_bins=200, value_range=None):
     """Build bin edges spanning the REFERENCE values only
 
-    WARNING: this is the protocol of jarridrb/DEM's interatomic-distance TVD -- n_bins
-    equal-width bins spanning the reference values' own min and max. It is the convention the
-    published numbers use, and it has a real consequence: whatever the compared samples put
-    outside that range is dropped, then the survivors are renormalized, so the TVD understates
-    the discrepancy. weighted_histogram() reports that dropped mass rather than hiding it.
+    WARNING: this is the protocol of jarridrb/DEM's interatomic-distance TVD, n_bins equal-width
+    bins spanning the reference values' own min and max, which its published numbers use.
+    Whatever the compared samples put outside that range is dropped and the survivors
+    renormalized, so the TVD understates the discrepancy. weighted_histogram() reports that
+    dropped mass.
 
     Args:
         * ref_values (torch.Tensor): Reference values, of any shape
@@ -38,9 +38,9 @@ def reference_edges(ref_values, n_bins=200, value_range=None):
 def shared_edges(ref_values, values, n_bins=100, value_range=None):
     """Build bin edges spanning BOTH sets, so nothing is ever dropped
 
-    This is the convention the molecular panel's plots are drawn with, and the reason it needs a
-    second edge builder: reference_edges deliberately clips to the reference support to reproduce
-    a published number, while these edges cover everything both sides contain.
+    This is the convention the molecular panel's plots are drawn with. reference_edges clips to
+    the reference support to reproduce a published number; these edges cover everything both
+    sides contain.
 
     Args:
         * ref_values (torch.Tensor): Reference values, of any shape
@@ -63,8 +63,8 @@ def bin_indexes(values, edges):
     """Returns the bin of every value, negative or n_bins outside, with the LAST bin closed
 
     numpy.histogram closes the final bin so the largest value lands inside it, and both edge
-    builders put an edge exactly at that value, so leaving it half-open drops a sample from every
-    panel. Everything genuinely outside the range keeps an out-of-range index for the caller.
+    builders put an edge exactly at that value, so a half-open last bin would drop a sample from
+    every panel. Everything outside the range keeps an out-of-range index for the caller.
 
     Args:
         * values (torch.Tensor): Values to bin, of any shape
@@ -100,9 +100,8 @@ def weighted_histogram(values, edges, weights=None, return_out_of_range=False):
     n_bins = len(edges) - 1
     values_2d = values if values.dim() > 1 else values[:, None]
 
-    # Per-sample weight, broadcast over the entries of each row. The mass is float64 whatever the
-    # values are, as in euclidean_cost: accumulated in float32 it sums to 1 - 6e-8 over a DW-4
-    # panel, and out_of_range then reports dropped mass where none was dropped
+    # Per-sample weight, broadcast over the entries of each row, in float64 whatever the values
+    # are so that out_of_range reads zero when nothing is dropped
     if weights is None:
         weight_2d = torch.full_like(values_2d, 1.0 / values_2d.numel(), dtype=torch.float64)
     else:
@@ -161,10 +160,10 @@ def histogram_kl(hist, ref_hist):
 def jensen_shannon(hist, ref_hist):
     """Squared Jensen-Shannon distance in base 2 between two histograms, in [0, 1]
 
-    This is scipy's jensenshannon(..., base=2) ** 2, which is the convention the molecular
-    reference implementation reports every one of its divergences in, so the whole corpus uses it
-    rather than carrying two units for one quantity. Both sides are smoothed by EPS first, as
-    upstream does, which is what keeps an empty reference cluster finite.
+    This is scipy's jensenshannon(..., base=2) ** 2, the convention the molecular reference
+    implementation reports its divergences in, and the one every divergence of the corpus uses.
+    Both sides are smoothed by EPS first, as upstream does, which keeps an empty reference
+    cluster finite.
 
     Args:
         * hist, ref_hist (torch.Tensor of shape (k,)): Two distributions over the same support
@@ -183,6 +182,15 @@ def compare_histograms(values, ref_values, edges=None, n_bins=200, value_range=N
                        return_hist=False):
     """Bin two sets of values on shared edges and compare the resulting histograms
 
+    WARNING: read 'tvd' together with 'out_of_range'. The scored histogram is renormalised over
+    the mass inside the edges, so a sampler that puts most of its mass outside them can still read
+    a small 'tvd'; the dropped mass is the signal there, and that pair of numbers tells a diffuse
+    sampler apart from a mis-shaped one.
+
+    NOTE: when ALL of the scored mass falls outside the edges there is nothing to renormalise, and
+    the two sets share no bin: 'tvd' reads 1, the distance between disjoint distributions, and
+    'out_of_range' 1.
+
     Args:
         * values (torch.Tensor of shape (n,) or (n, k)): Values to score
         * ref_values (torch.Tensor of shape (m,) or (m, k)): Reference values
@@ -194,12 +202,6 @@ def compare_histograms(values, ref_values, edges=None, n_bins=200, value_range=N
         * weights (torch.Tensor of shape (n,)): Weights of values (default is None)
         * return_hist (bool): Whether to also return the raw histograms and their edges
             (default is False)
-
-    WARNING: read 'tvd' together with 'out_of_range'. When ALL of the scored mass falls outside
-    the shared edges the histogram is empty rather than renormalised, so 'tvd' reads 0.5 -- half
-    the reference mass -- not 1, while 'out_of_range' reads 1.0. The dropped mass is the signal
-    there, and that pair of numbers is what tells a diffuse sampler apart from a merely
-    mis-shaped one.
 
     Returns:
         * metrics (dict): 'tvd', 'kl', 'js' and 'out_of_range', the last being the fraction of
@@ -213,7 +215,7 @@ def compare_histograms(values, ref_values, edges=None, n_bins=200, value_range=N
                                             return_out_of_range=True)
     ref_hist = weighted_histogram(ref_values, edges)
     metrics = {
-        'tvd': histogram_tvd(hist, ref_hist),
+        'tvd': histogram_tvd(hist, ref_hist) if float(hist.sum()) > 0.0 else 1.0,
         'kl': histogram_kl(hist, ref_hist),
         'js': jensen_shannon(hist, ref_hist),
         'out_of_range': out_of_range,

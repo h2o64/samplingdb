@@ -201,13 +201,17 @@ def test_wasserstein_1d_is_exact_for_both_powers():
 
 
 def test_fully_out_of_range_samples_are_reported_not_renormalised():
-    """All mass outside the edges gives out_of_range 1.0 and a tvd of 0.5, never a flattering one"""
+    """All mass outside the edges gives out_of_range 1.0 and a tvd of 1, never a flattering one"""
     ref = torch.randn(200, dtype=torch.float64)
     far = ref + 1000.0
     scalars, hist = metrics.compare_histograms(far, ref, n_bins=32, return_hist=True)
     assert scalars['out_of_range'] == 1.0
-    assert abs(scalars['tvd'] - 0.5) < 1e-12
+    assert scalars['tvd'] == 1.0
     assert float(hist['hist'].sum()) == 0.0
+
+    # Ranked last, after a sample with a sliver of mass inside the edges
+    sliver = torch.cat([far[:199], ref[:1]])
+    assert metrics.compare_histograms(sliver, ref, n_bins=32)['tvd'] < 1.0
 
     # And a partially out-of-range sample reports the fraction it lost
     half = torch.cat([ref[:100], ref[100:] + 1000.0])
