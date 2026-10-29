@@ -7,6 +7,7 @@ from huggingface_hub import CommitOperationAdd, HfApi, get_token, login
 from samplingdb import CATALOG, build, catalog, data
 from samplingdb.data import (REFERENCE_CHECKSUMS, REFERENCE_REPO, REFERENCE_REVISION, cache_dir,
                              sha256)
+from samplingdb.targets import spec_id
 
 # The dataset card's template, which this script fills with the table of files
 CARD = pathlib.Path(__file__).resolve().parent / 'card.md'
@@ -45,7 +46,8 @@ def size(path):
 
 
 def published_targets():
-    """Maps the dataset-repo path every catalogued target reads its reference set from to the target
+    """Maps the dataset-repo path of every reference set and train split a catalogued target reads
+    to the target
 
     Returns:
         * targets (dict): File in the dataset repo -> (catalog name, target)
@@ -57,6 +59,7 @@ def published_targets():
         if target.reference_folder is not None:
             file = target.reference_folder + '/' + target.reference_key() + '.npy'
             targets[file] = (name, target)
+        targets['train/' + target.train_key() + '.npy'] = (name, target)
     return targets
 
 
@@ -88,7 +91,7 @@ def check_file(file, name, target):
     manifest = json.loads(manifest_path.read_text())
     if manifest['checksums'].get(path.name) != digest:
         problems.append(file + ': the manifest records another sha256')
-    if str(manifest.get('spec_id')) + '.npy' != file.split('_')[-1]:
+    if manifest.get('spec_id') != spec_id(target.spec()):
         problems.append(file + ': the manifest records spec_id ' + str(manifest.get('spec_id')))
     if manifest['target'] != target.name:
         problems.append(file + ': the manifest names the target ' + manifest['target'])
@@ -102,7 +105,9 @@ def check_file(file, name, target):
 
     # What the card says about how independent the rows are
     protocol = manifest['protocol']
-    if 'efficiency' in protocol and 'min_ess_bulk' in protocol:
+    if 'train_recipe' in protocol:
+        quality = 'train split, recipe ' + protocol['train_recipe']
+    elif 'efficiency' in protocol and 'min_ess_bulk' in protocol:
         quality = 'bulk ESS %.0f%% of the draws' % (100 * protocol['min_ess_bulk'] / len(array))
     elif 'efficiency' in protocol:
         quality = '%.0f%% effective' % (100 * protocol['efficiency'])
@@ -204,7 +209,7 @@ for file, (name, target) in targets.items():
               '    to REFERENCE_CHECKSUMS in samplingdb/data.py and bump REFERENCE_REVISION.'
               % (file, name, file, sha256(path)))
     else:
-        print('  not generated: %s (%s) has no reference set yet.' % (file, name))
+        print('  not generated: %s (%s) is not in the cache yet.' % (file, name))
 
 # 2. Check every registered set in the cache
 print('\n2/5  Checking the cached sets in %s' % cache_dir())

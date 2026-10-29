@@ -10,5 +10,5 @@ from .targets import (
     PeriodicPairMixture, Rings, Seeds, Target, TwoModes, build, catalog, download_references,
 )
 
-# The single source of the version: pyproject.toml reads this attribute rather than repeating it
-__version__ = '0.3.0'
+# The single source of the version, which pyproject.toml reads
+__version__ = '0.4.0'

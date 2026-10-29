@@ -1,6 +1,6 @@
 ---
 license: mit
-pretty_name: samplingdb reference sets
+pretty_name: samplingdb reference sets and train splits
 tags:
 - sampling
 - mcmc
@@ -20,6 +20,8 @@ library of unnormalised densities for benchmarking samplers. A sampler's output 
 these sets. Each one comes from a long Markov chain run on the target's own density (MCMC, or
 replica-exchange molecular dynamics for the peptides), or from an exact sampler where the posterior
 allows one, and passed the convergence and independence checks below before it was published here.
+The repo also holds every target's default train split, the cheap and biased set a sampler may
+learn from, so that every user reads the same one.
 
 You do not need to download anything by hand. samplingdb fetches a set the first time it is used,
 checks its sha256, and keeps it in its cache.
@@ -35,6 +37,7 @@ from samplingdb import build
 
 target = build('lj55')
 reference = target.test_samples(n=10000)   # downloads the set once (66 MB), then reads the cache
+train = target.train_samples()             # the published train split, downloaded once
 metrics = target.compute_metrics(samples)  # samples: your sampler's output, same shape
 ```
 
@@ -77,8 +80,10 @@ Each row of an array is one sample, flattened, in the coordinates the samplingdb
 | `md/` | peptides | atom positions in nanometres, in the atom order of the released PDB |
 | `stan/` | Bayesian posteriors | the unconstrained parameters, in samplingdb's order |
 | `exact/` | the Brownian motion posterior | the unconstrained parameters, in samplingdb's order |
+| `train/` | every target | the coordinates of the target's own folder above, or its `log_prob`'s |
 
-A file is named `<folder>/<target name>_<spec_id>.npy`. The `spec_id` is a hash of the constants
+A file is named `<folder>/<target name>_<spec_id>.npy`, and a train split
+`train/<target name>_<spec_id>_<recipe>.npy`. The `spec_id` is a hash of the constants
 that define the density, so a set can never be read against a different density than the one it
 was drawn from. Next to every array, `<same name>_manifest.json` records the target, its `spec_id`,
 the full generation protocol with its diagnostics, and the array's sha256.
@@ -88,7 +93,7 @@ the full generation protocol with its diagnostics, and the array's sha256.
 Independence is the effective sample size as a fraction of the rows: measured on the stored chains
 for the tempered runs and the glass, and Stan's smallest bulk ESS for the posteriors, which exceeds
 100% where successive NUTS draws are anticorrelated. The exact draws are independent by
-construction.
+construction. A train split is biased on purpose, so its row says which recipe made it.
 
 The rows are interleaved across chains, so the first `n` rows of a file span every chain of the run
 that produced it, and `test_samples(n=...)` can read a prefix.
@@ -105,6 +110,7 @@ documents each protocol and its acceptance checks in `docs/reference-sets.md`.
 | `swapmc/` | swap Monte Carlo on the GPU, 16 384 chains started from equilibrated configurations and stored at a fixed spacing | the merged set is at least 90% independent on the energy and the pair distances, with no drift from its start, and the specific heat agrees between the two halves of the run |
 | `stan/` | Stan's NUTS, on models written in samplingdb's own coordinates | Stan's log density equals samplingdb's to 1e-9; R-hat below 1.01, bulk ESS above 90% of the draws, no divergences |
 | `exact/` | rejection sampling of the two log scales from their priors against the bounded marginal likelihood, then the locations from their exact Gaussian conditional | the factorised density equals samplingdb's up to a constant, to 1e-8 across 1000 random points; every proposal stays below the bound |
+| `train/` | the target's own `generate_train_samples` at seed 0, 100 000 samples, on a GPU (`gen/train/generate.py`) | samplingdb's tests: every mode of the test split visited in the wrong proportions, and the test energies covered at both ends |
 
 ## Versions
 
@@ -117,6 +123,7 @@ changes its bytes under a new tag; samplingdb refuses a cached copy from another
 | --- | --- |
 | `v1` | 17 sets |
 | `v2` | the Brownian posterior from an exact sampler, under `exact/` in place of `stan/`; both ternary glass sets regenerated on the GPU; the three particle sets, unchanged, under new names, since the particle count joined their `spec_id`; the binary Kob-Andersen glass at T = 0.2, published for the first time; every set under the MIT License, in place of CC BY 4.0 |
+| `v3` | the default train split of every target, under `train/`; the reference sets of `v2`, unchanged |
 
 ## License and attribution
 

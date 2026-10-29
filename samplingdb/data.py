@@ -3,8 +3,9 @@
 # NOTE: every third-party input is fetched from the source that published it -- a pinned GitHub
 # commit for the Tier 2 datasets, a pinned Hugging Face revision for the Tier 3 structures --
 # rather than mirrored into a repo of our own, so the redistribution question never has to be
-# answered for them, and every one is checked against its sha256. The reference sets this library
-# generates itself are published in REFERENCE_REPO and fetched from a pinned tag.
+# answered for them, and every one is checked against its sha256. The reference sets and the
+# default train splits this library generates itself are published in REFERENCE_REPO and fetched
+# from a pinned tag.
 # SAMPLINGDB_DATA_DIR overrides any of them: if the file it names exists, it is used, checksum
 # still verified, and nothing is downloaded.
 
@@ -12,17 +13,18 @@
 import hashlib, os, pathlib, shutil, urllib.request
 import numpy as np
 
-# The Hugging Face dataset repo holding the generated reference sets, and the tag they are read at.
-# A file is named <folder>/<name>_<spec_id>.npy, so a density change is a new file. A set
+# The Hugging Face dataset repo holding the generated reference sets and train splits, and the tag
+# they are read at. A reference set is named <folder>/<name>_<spec_id>.npy and a train split
+# train/<name>_<spec_id>_<recipe>.npy, so a density or recipe change is a new file. A set
 # regenerated for the same density keeps its name and changes its bytes under a new tag: every tag
 # keeps serving what the code that pins it expects, and verify_once refuses a cache filled at
 # another one. gen/publish/publish.py uploads and tags a release
 REFERENCE_REPO = 'h2o64/samplingdb'
-REFERENCE_REVISION = 'v2'
+REFERENCE_REVISION = 'v3'
 REFERENCE_URL = ('https://huggingface.co/datasets/' + REFERENCE_REPO + '/resolve/'
                  + REFERENCE_REVISION + '/')
 
-# The sha256 of every published reference set at REFERENCE_REVISION
+# The sha256 of every published file at REFERENCE_REVISION
 REFERENCE_CHECKSUMS = {
     'pt/dw4_d9994289.npy': '73bd27b31005afb9c86a4bb26e9f8f57f9332479d5966d9728dbe6cb9126a319',
     'pt/lj13_bd3bc3a0.npy': '19f1d7b274e0dbf83584ae01873663885c6a0f1e43d79256d490861715faa26e',
@@ -53,6 +55,62 @@ REFERENCE_CHECKSUMS = {
         '4bd3a688ebe1044d0441779f64947396c74dcbab6011f209f7efafc4e7d925fb',
     'swapmc/ka-ternary-N44-T1.0_c0f9b3b8.npy':
         '4aa1a2acb7e8f8dc6b7e5f6633c72b36ce5b53fb5c052b8ab1dfda5b313d7eec',
+    'train/funnel_556b9f8f_uniform-neck.npy':
+        '608cb9d343f7dc09b47f40b48e387485bd4ebfa681a488a947f400e798dcea20',
+    'train/manywell_30beb4d2_uniform-sides.npy':
+        'c0f2d79f009babc1e2427326c8c22ef645b0451d08e90b909c815468428e23c0',
+    'train/gmm40_a1f669cb_skewed-modes.npy':
+        '902e77305819a6df4b02e7a60732091456993890c5f38ca2e7f50dea4b714f5f',
+    'train/mos_3d819321_skewed-modes.npy':
+        'abaf41a6588c755a2f8c157859fce2c8b0a2e8d9214a0b47fa5f7290c0d6c804',
+    'train/twomodes_0eddf6c9_skewed-modes.npy':
+        'b7bc9333930b86d772fe28c5ba616a37cc7611f04c554d98f885186a2403f432',
+    'train/brackettwomodes_334746c8_skewed-modes.npy':
+        'f54c5639478d89911835a9554865b608b0063c79d1e7b829a6ee333e578ae739',
+    'train/manymodes-k3_edf2fcb2_skewed-modes.npy':
+        'd8b76e7d2fb77766e93ae76d25d57b91bac09dd0351839e9580f9a9644cfdb3a',
+    'train/eightgaussians_ae0110e3_skewed-modes.npy':
+        'c7b19e7d2425fab5198a94af5376e5121037d86e75683adca407c5a184e2d66e',
+    'train/rings_5deb01ff_skewed-modes.npy':
+        '8331ce81170c341f3fe20c302ab56e8028e80f3de40ffee35bc4d8f32c04d079',
+    'train/checkerboard_9547623f_skewed-modes.npy':
+        'd5333a6241bcc8d4990ee84429b30b0ce2a0d481a55e75e8be769a5707688ddf',
+    'train/dw4_d9994289_tempered-mala.npy':
+        '6efccba32af8907ef0ada62c43811bfccc1bdc7fcbc6dc4bc8f1d78a62b43116',
+    'train/lj13_bd3bc3a0_tempered-mala.npy':
+        '3e42b73b7e98b900c4ee4b1b7fd214ff5e98d7c983375ca71353c1926c41c334',
+    'train/lj55_01c56181_tempered-mala.npy':
+        'd85e191f9c321aaec8c775b6d1a74a4e2fd7b0d156b8d002468284dd53dba821',
+    'train/seeds_f9a50f20_tempered-mala.npy':
+        '7dd420a38455ca59752f11ebf6597829b9f979652c9e0e0af44af447c0a4527a',
+    'train/brownian_45794097_tempered-mala.npy':
+        '80e41cc8bd5951ffb0a8dcbd58ba49aeee9520bd389987b9c3ff74700606c9da',
+    'train/lgcp_cea6d9a6_tempered-mala.npy':
+        'd9631f245d06a9edc50f406bcb0f8b3ebe4463686534bc5148d7ccbc1944866a',
+    'train/lgcp-whitened_30e98363_tempered-mala.npy':
+        '1c693f538dbcd2f12faa2b2087dfb7af65336efd4e5f28b13d027090a328cb7c',
+    'train/ka-ternary-N44-T1.0_c0f9b3b8_basin-mc.npy':
+        '9c5fc93d78a6204d837e91a8b252e09b880a7c558cd419d4799f8a0cda0de355',
+    'train/ka-ternary-N44-T0.32_d50e8a3f_basin-mc.npy':
+        '3eb8a8f96bb7bd0227915398a3e4dbe937f01508cd1112dc4925ef5c002d264f',
+    'train/ka-binary-N64-T0.2_e60ecba4_basin-mc.npy':
+        'b7fd623d9db0f1f95fdf840a7f9fa0c07790e8f0e4032846e7c3f6674d507c1c',
+    'train/ionosphere_d00109c3_tempered-mala.npy':
+        'dcd863520b14de5f143577919a3ac95c92f2eadc8f3f0bfcea1b0544e7ed1a87',
+    'train/sonar_52aa10ef_tempered-mala.npy':
+        '51ab9e72398d68bdf11a902edea126a449b24edb063e8649a2e866dc8974d5e1',
+    'train/german-credit_3cfdf175_tempered-mala.npy':
+        '160f60f93c8558ea4b737b1b83c534465de0c388d740eea6a60cef790c35a443',
+    'train/breast-cancer_543f5f94_tempered-mala.npy':
+        '663061fd6a04e88d85dfc0a37927bf0e120556d51c7dea3ff88d05338c280992',
+    'train/ace-a-nme-T300_54968005_basin-md.npy':
+        '2164f5cf241f73513d0c594efa90b9ff2770c55fbe3be8996872832b32a0cd39',
+    'train/ace-aaa-nme-T300_cda31701_basin-md.npy':
+        '1a7c6d4887f3ebc9e5240690f24c025f98f2c5c95c3a3b2e13c4b6783a40905f',
+    'train/aaa-T310_e0bfbee3_basin-md.npy':
+        '0fc238170e4df165182af2d45c3eee3bcdc8555671d570ed84378bff1c6e9b3c',
+    'train/aaaaaa-T310_08d2d916_basin-md.npy':
+        '13d720b153f42d3ef8e57be48d0ca200f7d62c2aa09a5ccd15d6b8cfc97d7228',
 }
 
 
@@ -221,7 +279,7 @@ def fetch_url(url, name, checksum=None, folder=None):
 
 
 def fetch_reference(folder, key, hint):
-    """Returns the path of a generated reference set, downloading the published one on a cache miss
+    """Returns the path of a generated set, downloading the published one on a cache miss
 
     A set in the cache that is not published yet is used as it is, so a freshly generated set is
     read before it is published. A published one is checked against REFERENCE_CHECKSUMS once, and
@@ -232,8 +290,8 @@ def fetch_reference(folder, key, hint):
 
     Args:
         * folder (str): Cache sub-directory of the generator that writes it: 'pt', 'md', 'stan',
-            'swapmc' or 'exact'
-        * key (str): File stem, the target's name and spec_id, as Target.reference_key returns it
+            'swapmc', 'exact', or 'train' for a train split
+        * key (str): File stem, as Target.reference_key or Target.train_key returns it
         * hint (str): How to generate the set, quoted when it is neither cached nor published
 
     Returns:

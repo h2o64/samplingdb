@@ -1,7 +1,8 @@
 # The catalog: every target this library ships, under its one name
 
 # Libraries
-from ..data import REFERENCE_CHECKSUMS, fetch_reference
+from .. import data
+from ..data import fetch_reference
 from .bayesian import LOGISTIC_DATASETS, Brownian, LGCP, LogisticRegression, Seeds
 from .mixtures import BracketTwoModes, EightGaussians, GMM40, ManyModes, MoS, TwoModes
 from .molecular import PEPTIDE_SYSTEMS, Peptide
@@ -106,36 +107,39 @@ def catalog(data=None):
 
 
 def download_references(names=None):
-    """Downloads the published reference sets into the cache, ahead of their first use
+    """Downloads the published reference sets and train splits into the cache, ahead of first use
 
-    test_samples() downloads a missing set by itself, so this is only for fetching ahead of time:
-    on a login node before a job runs on compute nodes with no internet access, for instance. A set
-    already in the cache is left as it is, so calling this twice costs nothing.
+    test_samples() and train_samples() download a missing file by themselves, so this is only for
+    fetching ahead of time: on a login node before a job runs on compute nodes with no internet
+    access, for instance. A file already in the cache is left as it is, so calling this twice costs
+    nothing.
 
         import samplingdb
-        samplingdb.download_references(['dw4', 'lj55'])  # two sets, 70 MB
-        samplingdb.download_references()                 # every published set, 3.1 GB
+        samplingdb.download_references(['dw4', 'lj55'])  # both splits of two targets, 150 MB
+        samplingdb.download_references()                 # every published file, 6.3 GB
 
     Args:
-        * names (list of str or None): Catalog keys; None takes every published set, without
+        * names (list of str or None): Catalog keys; None takes every published file, without
             building a target, so it needs none of the optional dependencies (default is None)
 
     Returns:
         * paths (dict): File in the dataset repo -> its path on this machine
 
     Raises:
-        * FileNotFoundError: For a named target whose set is not published yet
+        * FileNotFoundError: For a named target whose reference set is not published yet
     """
     # Name the files, by building each named target for its spec_id
     if names is None:
-        files = list(REFERENCE_CHECKSUMS)
+        files = list(data.REFERENCE_CHECKSUMS)
     else:
         files = []
         for name in names:
             target = build(name)
-            assert target.reference_folder is not None, (
-                name + ' draws its reference set exactly, so there is nothing to download')
-            files.append(target.reference_folder + '/' + target.reference_key() + '.npy')
+            if target.reference_folder is not None:
+                files.append(target.reference_folder + '/' + target.reference_key() + '.npy')
+            train = 'train/' + target.train_key() + '.npy'
+            if train in data.REFERENCE_CHECKSUMS:
+                files.append(train)
 
     # Fetch them
     paths = {}
