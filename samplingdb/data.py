@@ -20,7 +20,7 @@ import numpy as np
 # keeps serving what the code that pins it expects, and verify_once refuses a cache filled at
 # another one. gen/publish/publish.py uploads and tags a release
 REFERENCE_REPO = 'h2o64/samplingdb'
-REFERENCE_REVISION = 'v3'
+REFERENCE_REVISION = 'v4'
 REFERENCE_URL = ('https://huggingface.co/datasets/' + REFERENCE_REPO + '/resolve/'
                  + REFERENCE_REVISION + '/')
 
@@ -75,12 +75,12 @@ REFERENCE_CHECKSUMS = {
         '8331ce81170c341f3fe20c302ab56e8028e80f3de40ffee35bc4d8f32c04d079',
     'train/checkerboard_9547623f_skewed-modes.npy':
         'd5333a6241bcc8d4990ee84429b30b0ce2a0d481a55e75e8be769a5707688ddf',
-    'train/dw4_d9994289_tempered-mala.npy':
-        '6efccba32af8907ef0ada62c43811bfccc1bdc7fcbc6dc4bc8f1d78a62b43116',
-    'train/lj13_bd3bc3a0_tempered-mala.npy':
-        '3e42b73b7e98b900c4ee4b1b7fd214ff5e98d7c983375ca71353c1926c41c334',
-    'train/lj55_01c56181_tempered-mala.npy':
-        'd85e191f9c321aaec8c775b6d1a74a4e2fd7b0d156b8d002468284dd53dba821',
+    'train/dw4_d9994289_hot-mala.npy':
+        '786afde848598c49543742ca85160e266f17fd38e530b118c00f626be80b841c',
+    'train/lj13_bd3bc3a0_hot-mala.npy':
+        'cf4699308b5a365a77d95274da2d24bdaf4779d84b1718134654369cba2491bd',
+    'train/lj55_01c56181_hot-mala.npy':
+        '1b70a7ce3a422c71f1cfcf370a1b236446315bedfe00dd1c9c82fa220cf3e635',
     'train/seeds_f9a50f20_tempered-mala.npy':
         '7dd420a38455ca59752f11ebf6597829b9f979652c9e0e0af44af447c0a4527a',
     'train/brownian_45794097_tempered-mala.npy':
@@ -89,12 +89,12 @@ REFERENCE_CHECKSUMS = {
         'd9631f245d06a9edc50f406bcb0f8b3ebe4463686534bc5148d7ccbc1944866a',
     'train/lgcp-whitened_30e98363_tempered-mala.npy':
         '1c693f538dbcd2f12faa2b2087dfb7af65336efd4e5f28b13d027090a328cb7c',
-    'train/ka-ternary-N44-T1.0_c0f9b3b8_basin-mc.npy':
-        '9c5fc93d78a6204d837e91a8b252e09b880a7c558cd419d4799f8a0cda0de355',
-    'train/ka-ternary-N44-T0.32_d50e8a3f_basin-mc.npy':
-        '3eb8a8f96bb7bd0227915398a3e4dbe937f01508cd1112dc4925ef5c002d264f',
-    'train/ka-binary-N64-T0.2_e60ecba4_basin-mc.npy':
-        'b7fd623d9db0f1f95fdf840a7f9fa0c07790e8f0e4032846e7c3f6674d507c1c',
+    'train/ka-ternary-N44-T1.0_c0f9b3b8_hot-basin-mc.npy':
+        '402224ce3130cb212b66f266f0d5c2f98a5fa9236882e348f6c9437d5900c140',
+    'train/ka-ternary-N44-T0.32_d50e8a3f_hot-basin-mc.npy':
+        '4679fb695558a2628c78f970ee3baedb95d330b70fcc48b20a547c692ee1ae2a',
+    'train/ka-binary-N64-T0.2_e60ecba4_hot-basin-mc.npy':
+        'f02dd6baff3f1b165b1330072956a387b96c9361bc1f12672738f94fb77e720e',
     'train/ionosphere_d00109c3_tempered-mala.npy':
         'dcd863520b14de5f143577919a3ac95c92f2eadc8f3f0bfcea1b0544e7ed1a87',
     'train/sonar_52aa10ef_tempered-mala.npy':

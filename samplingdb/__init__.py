@@ -11,4 +11,4 @@ from .targets import (
 )
 
 # The single source of the version, which pyproject.toml reads
-__version__ = '0.4.0'
+__version__ = '0.4.1'
