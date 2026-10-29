@@ -71,11 +71,14 @@ class ParticleTarget(Target):
 
     train_recipe = 'hot-mala'
 
-    # Lowest and highest temperature factor of the train chains, and the power that packs them at
-    # the hot end: the bulk of the train energies sits above the test ones, and the thin run of
-    # colder chains carries its low tail across them, just past their lowest
+    # The train chains' temperature factors: most on a hot ladder, train_temperatures, packed at
+    # its hot end by train_ladder_power, so the bulk of the train energies sits above the test
+    # ones; a fraction train_cold_fraction on train_cold_temperatures, whose tail carries the train
+    # energies across the test ones, just past their lowest
     train_temperatures = (0.8, 3.0)
     train_ladder_power = 0.5
+    train_cold_fraction = 0.0
+    train_cold_temperatures = (0.8, 1.0)
 
     # How many times the energy counts each unordered pair. DW-4 counts each once (bgflow's
     # compute_distances(remove_duplicates=True)); the Lennard-Jones systems count each TWICE,
@@ -226,16 +229,51 @@ class ParticleTarget(Target):
         x = torch.as_tensor(array, dtype=self.dtype, device=self.device)
         return self.preprocess(x)
 
+    def train_factors(self, n_chains, temperatures=None, ladder_power=None, cold_fraction=None,
+                      cold_temperatures=None):
+        """Returns the temperature factor of every train chain, the cold chains first
+
+        Args:
+            * n_chains (int): Number of chains
+            * temperatures (tuple of two floats or None): Lowest and highest factor of the hot
+                chains; None uses train_temperatures (default is None)
+            * ladder_power (float or None): Power of the hot ladder; None uses train_ladder_power
+                (default is None)
+            * cold_fraction (float or None): Fraction of the chains on the cold ladder; None uses
+                train_cold_fraction (default is None)
+            * cold_temperatures (tuple of two floats or None): Lowest and highest factor of the
+                cold chains; None uses train_cold_temperatures (default is None)
+
+        Returns:
+            * factors (torch.Tensor of shape (n_chains,)): Temperature factors
+        """
+        if temperatures is None:
+            temperatures = self.train_temperatures
+        if ladder_power is None:
+            ladder_power = self.train_ladder_power
+        if cold_fraction is None:
+            cold_fraction = self.train_cold_fraction
+        if cold_temperatures is None:
+            cold_temperatures = self.train_cold_temperatures
+        n_cold = int(cold_fraction * n_chains)
+        return torch.cat([
+            temperature_ladder(n_cold, cold_temperatures, dtype=self.dtype, device=self.device),
+            temperature_ladder(n_chains - n_cold, temperatures, dtype=self.dtype,
+                               device=self.device, power=ladder_power)])
+
     def generate_train_samples(self, n, seed=0, x0=None, n_chains=1000, n_steps=1000, thin=10,
-                               temperatures=None, ladder_power=None):
+                               temperatures=None, ladder_power=None, cold_fraction=None,
+                               cold_temperatures=None):
         """Runs the hot-chains recipe: most chains too hot, a few reaching the lowest test energies
 
         n_chains chains start from the fixed lattice configuration (initial_configuration)
-        jittered by N(0, 0.1^2) per coordinate. Chain i samples exp(log_prob / factor_i), the
-        factors running over train_temperatures with the chain index (temperature_ladder), packed
-        at the hot end by train_ladder_power. Each takes n_steps MALA moves whose step size adapts
-        per chain towards 57% acceptance, then keeps one state every thin moves until the chains
-        hold n between them (tempered_mala). The split is those states frame by frame, centred.
+        jittered by N(0, 0.1^2) per coordinate. Chain i samples exp(log_prob / factor_i). The
+        first cold_fraction of the chains take factors running geometrically over
+        cold_temperatures with the chain index, and the others factors running over temperatures,
+        packed at the hot end by ladder_power (temperature_ladder). Each chain takes n_steps MALA
+        moves whose step size adapts per chain towards 57% acceptance, then keeps one state every
+        thin moves until the chains hold n between them (tempered_mala). The split is those states
+        frame by frame, centred.
 
         The adaptive moves relax the energy of every chain at its own temperature, so the bulk of
         the train energies lies above the test ones, and only the tail of the colder chains
@@ -255,6 +293,10 @@ class ParticleTarget(Target):
                 None uses train_temperatures (default is None)
             * ladder_power (float or None): Power of the ladder, below 1 packing the chains at
                 the hot end; None uses train_ladder_power (default is None)
+            * cold_fraction (float or None): Fraction of the chains on the cold ladder; None uses
+                train_cold_fraction (default is None)
+            * cold_temperatures (tuple of two floats or None): Lowest and highest temperature
+                factor of the cold chains; None uses train_cold_temperatures (default is None)
 
         Returns:
             * x (torch.Tensor of shape (n, dim)): The biased samples, mean-free
@@ -264,12 +306,9 @@ class ParticleTarget(Target):
         if x0 is None:
             x0 = self.initial_configuration() + 0.1 * torch.randn(
                 n_chains, self.dim, generator=gen, dtype=self.dtype, device=self.device)
-        if temperatures is None:
-            temperatures = self.train_temperatures
-        if ladder_power is None:
-            ladder_power = self.train_ladder_power
-        factors = temperature_ladder(n_chains, temperatures, dtype=self.dtype, device=self.device,
-                                     power=ladder_power)
+        factors = self.train_factors(n_chains, temperatures=temperatures, ladder_power=ladder_power,
+                                     cold_fraction=cold_fraction,
+                                     cold_temperatures=cold_temperatures)
         trace = tempered_mala(self.log_prob, self.score, cycle(self.cast(x0), n_chains), factors,
                               n_steps, n_frames, thin, generator=gen)
         return self.preprocess(interleave(trace, n))
@@ -410,6 +449,12 @@ class LennardJones(ParticleTarget):
     energy_histogram_range = (-60.0, 0.0)
     pair_multiplicity = 2
 
+    # Nine train chains in ten at one temperature, too hot, whose energies sit just above the test
+    # ones, and one in ten from 0.8 to 1 times the target's, reaching just past the lowest of them
+    train_recipe = 'split-mala'
+    train_temperatures = (1.7, 1.7)
+    train_cold_fraction = 0.1
+
     def __init__(self, n_particles=13, spatial_dim=3, eps=1.0, tau=1.0, r=1.0, c_harm=0.5,
                  name='lj13', prior_scale=1.0, dtype=torch.float32):
         """Builds the Lennard-Jones cluster
@@ -493,6 +538,7 @@ class LJ55(LennardJones):
     """LJ-55: 55 particles in 3D, dim 165"""
 
     energy_histogram_range = (-380.0, -180.0)
+    train_temperatures = (1.6, 1.6)
 
     def __init__(self, dtype=torch.float32):
         """Builds LJ-55 with the pinned bgflow / dem constants"""
