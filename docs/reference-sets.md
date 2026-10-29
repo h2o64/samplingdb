@@ -62,6 +62,107 @@ ternary mixture, never A<->B. One time unit is `n_particles` attempted moves. Wi
 the move is compiled and every draw is made on the generator's device, which on a GPU runs about
 nine times faster than the eager loop.
 
+## What a set costs
+
+A train split of 100 000 samples takes one GPU between about a second and a minute. The test split
+of the same size, near-independent draws from the target, takes from seconds on the simplest
+posteriors to more than 200 GPU-hours. The factor between the two follows how slowly the target
+mixes: about 35 000 on the hexapeptide and the binary glass, 450 to 2 000 on the other peptides and
+the direct LGCP, 60 to 130 on the particle clusters, Seeds and the supercooled ternary glass, and 5
+to 35 on the logistic regressions, the whitened LGCP, Brownian and the ternary liquid. The
+benchmark gives a sampler the cheap split to learn from and scores it against the expensive one.
+
+The ten synthetic targets of Tier 0 are left out: their test splits are exact draws, their train
+splits short runs of at most 200 moves, and each takes under a second on a GPU.
+
+### How the costs are counted
+
+- A train split is one uncached call of `build(name).to('cuda').generate_train_samples(100000)` on
+  an RTX A6000, compilation included.
+- A test split is the wall clock in the manifest of the published set, summed over its shards and
+  the runs that extended them, plus the calibration run of the sets made by frozen shards. The
+  peptide generator does not time the 50 ps of dynamics that equilibrate each shard; it is added at
+  the shard's own rate.
+- The rows of the three particle clusters are estimates: the published run's scans at the speed of
+  the compiled sampler, measured on the A6000 with a short run at the published settings.
+- The GPU sets ran on an RTX A6000 (the particle clusters, the ternary glass) or on H100 or A100
+  GPUs (the peptides, the binary glass). A GPU-hour on any of them counts as one, which moves no
+  ratio by more than a factor of three.
+- The Stan sets and the exact Brownian sampler run on the CPU of one workstation, one core per Stan
+  chain and 16 cores for the exact sampler, and are counted in core-hours. Their ratio divides the
+  run's wall clock by the train split's. The exact sampler records no wall clock: its row is an
+  estimate, its 86 batches of 200 000 proposals at the measured speed of one batch.
+- A set larger or smaller than 100 000 rows is scaled linearly to 100 000.
+- The ternary glass's chains and half of the binary glass's ladders start from equilibrated
+  configurations of another run, whose cost is not counted.
+
+| Target | Train split | Test split | Test generator | Test / train |
+| --- | --- | --- | --- | --- |
+| `dw4` | 1.0 s | 0.02 GPU-h, estimate | parallel tempering | 80 |
+| `lj13` | 1.6 s | 0.04 GPU-h, estimate | parallel tempering | 95 |
+| `lj55` | 3.3 s | 0.06 GPU-h, estimate | parallel tempering | 60 |
+| `ionosphere`, `sonar`, `german-credit`, `breast-cancer` | 1.1 to 2.1 s | 0.013 to 0.019 core-h (11 to 17 s on 4 cores) | NUTS | 7 to 15 |
+| `seeds` | 0.9 s | 0.13 core-h (2 min on 4 cores) | NUTS | 130 |
+| `brownian` | 1.0 s | 0.15 core-h (35 s on 16 cores), estimate | exact rejection sampler | 35 |
+| `lgcp` | 52 s | 461 core-h (29 h on 16 cores) | NUTS | 2 000 |
+| `lgcp-whitened` | 63 s | 8.1 core-h (30 min on 16 cores) | NUTS | 30 |
+| `ace-a-nme-T300` | 19 s | 2.3 GPU-h | replica-exchange MD | 450 |
+| `aaa-T310` | 23 s | 2.9 GPU-h | replica-exchange MD | 470 |
+| `ace-aaa-nme-T300` | 25 s | 8.6 GPU-h | replica-exchange MD | 1 300 |
+| `aaaaaa-T310` | 22 s | 214 GPU-h | replica-exchange MD | 36 000 |
+| `ka-ternary-N44-T1.0` | 22 s | 0.03 GPU-h, scaled from 163 840 | swap Monte Carlo | 5 |
+| `ka-ternary-N44-T0.32` | 23 s | 0.65 GPU-h, scaled from 131 072 | swap Monte Carlo | 100 |
+| `ka-binary-N64-T0.2` | 24 s | 231 GPU-h, scaled from 30 720 | parallel tempering | 35 000 |
+
+The peptides compile their force field on the first call; a second call in the same process takes
+16 to 21 s. The shards of `aaaaaa-T310` (113 replicas each) and of the binary glass (256 ladders
+each) are batches too small to fill a GPU: at a full batch the first set would cost about a quarter
+of its GPU-hours, and the second about two thirds or less.
+
+### Why the test splits cost so much
+
+A test split has to be the target's equilibrium, sample by sample. Its generator has to cross the
+target's barriers many times, run long enough to forget where it started, and thin its chains
+until the kept states are close to independent, and every generator checks this before it writes
+anything (see the sections below). The cost follows the slowest motion of the
+target.
+
+The particle clusters and the binary glass run non-reversible parallel tempering. On the clusters
+the kept states are 2 to 16 scans apart, but each scan moves all 12 to 16 levels of a ladder by 2
+to 32 HMC trajectories of 10 leapfrog steps, and the adaptive rounds that place the levels cost as
+much as the collection round. The binary glass at T = 0.2 keeps one state every 458 752 scans of
+ten levels, after 294 912 scans of burn-in: each of its 2 048 ladders runs about 7.4 million
+scans, 200 force evaluations each, for the 15 states it contributes.
+
+The peptides run replica-exchange molecular dynamics over six levels of solute tempering, at 1 fs
+per step. Kept structures are 17 to 56 ps of dynamics apart at every level for the three short
+peptides, and 270 ps apart for `AAAAAA`, whose slowest backbone torsions also need 1.6 ns of
+burn-in. `AAAAAA`'s set is about 180 microseconds of dynamics in all.
+
+The ternary glass is the model built for swap Monte Carlo (Jung et al. 2023), and the swaps keep
+its test split affordable: at T = 0.32 each of 16 384 chains runs 240 000 time units against a
+structural relaxation time of about 2 300. At T = 1.0 the mixture is a liquid that relaxes in 265
+time units, and its test split costs about five times its train split.
+
+Stan's NUTS writes nothing unless the largest R-hat is below 1.01, the bulk effective sample size
+is above 90% of the draws, and no transition diverged. The logistic regressions are unimodal and
+nearly Gaussian, and pass in seconds. `seeds` needs a smaller step size and keeps one draw in 32,
+and the direct LGCP pays a dense 1600 x 1600 triangular solve at each of up to 1 023 leapfrog
+steps per draw. The exact Brownian sampler accepts 0.6% of its proposals: 17 million proposals,
+each a 20 x 20 Cholesky factorisation.
+
+### Why the train splits are cheap
+
+A train split has to cover the test split's modes and energies, and may get their proportions
+wrong. Its chains need not cross barriers or reach equilibrium, and its states need not be
+independent: 1 000 chains run in parallel, each for 2 000 MALA moves, 600 time units of
+displacements or 17 ps of Langevin dynamics, keeping a state every 10 moves, 5 time units or 50
+steps. The recipes place the chains in the modes directly. The mixtures draw a mode before they
+move, the peptides rotate every residue into a backbone basin, the glasses start from basins made
+by short Monte Carlo runs, and the particle chains run mostly hotter than the target, where they
+cross its barriers quickly. A peptide's train split is 17 ns of dynamics in all, against 14
+microseconds for the test split of `Ace-A-Nme` and 180 for that of `AAAAAA`.
+
 ## Sharded runs
 
 The two tempered generators share these modes, and `gen/merge_shards.py` combines their output.
