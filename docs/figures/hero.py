@@ -15,7 +15,7 @@ from common import density_map, pymol_render, save, start_pymol
 
 # Parse the arguments
 parser = argparse.ArgumentParser()
-parser.add_argument('--n_samples', type=int, default=20000)
+parser.add_argument('--n_samples', type=int, default=None)
 args = parser.parse_args()
 
 # Save the arguments in a dictionary
@@ -200,7 +200,7 @@ tiles['brownian'] = {'kind': 'bands', 'quantiles': np.quantile(paths, [0.05, 0.2
 
 # LGCP: the posterior mean intensity with the pines, and one draw in whitened coordinates
 lgcp = build('lgcp')
-field = lgcp.test_samples(n=2000)
+field = lgcp.test_samples(n=args.n_samples)
 intensity = torch.exp(field).mean(0).reshape(40, 40).numpy()
 pines = np.loadtxt(fetch_dataset('pines.csv'), delimiter=',', skiprows=1, usecols=(1, 2))
 tiles['lgcp'] = {'kind': 'field', 'image': levels(intensity), 'points': pines}
@@ -208,10 +208,11 @@ whitened = build('lgcp-whitened').test_samples(n=1)[0].reshape(40, 40).numpy()
 tiles['lgcp-whitened'] = {'kind': 'field', 'image': np.clip((whitened + 3.0) / 6.0, 0.0, 1.0),
                           'points': None}
 
-# The peptides: the most extended of the first 2000 reference structures, so the chain shows
+# The peptides: the most extended of the reference structures, so the chain shows
 for name, _, _, _, span in FAMILIES[3][3]:
     target = build(name, compile=False)
-    x = target.test_samples(n=2000).reshape(2000, -1, 3)
+    x = target.test_samples(n=args.n_samples)
+    x = x.reshape(len(x), -1, 3)
     ends = torch.linalg.norm(x[:, 0] - x[:, -1], dim=-1)
     index = int(torch.argsort(ends)[int(0.9 * len(ends))])
     tiles[name] = {'kind': 'molecule', 'topology': mdtraj.Topology.from_openmm(target.topology),

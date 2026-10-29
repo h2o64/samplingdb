@@ -14,7 +14,8 @@ from common import blank, density_map, legend, note, save
 
 # Parse the arguments
 parser = argparse.ArgumentParser()
-parser.add_argument('--n_samples', type=int, default=2048)
+parser.add_argument('--n_samples', type=int, default=None)
+parser.add_argument('--n_chain', type=int, default=10000)
 parser.add_argument('--n_bins', type=int, default=100)
 args = parser.parse_args()
 
@@ -23,6 +24,9 @@ config = vars(args)
 
 # Print the config
 pprint.pprint(config)
+
+# Make a Pytorch device
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # The 2D targets, each with the square window it is drawn in. ManyModes is drawn with ten modes,
 # where the catalog builds three, so the figure shows what the family is about
@@ -57,7 +61,8 @@ def log_density_grid(log_prob, x_window, y_window, n_grid=400):
     xs = torch.linspace(*x_window, n_grid, dtype=torch.float64)
     ys = torch.linspace(*y_window, n_grid, dtype=torch.float64)
     grid = torch.stack(torch.meshgrid(xs, ys, indexing='xy'), dim=-1).reshape(-1, 2)
-    return xs.numpy(), ys.numpy(), log_prob(grid).reshape(n_grid, n_grid).numpy()
+    values = log_prob(grid.to(device)).reshape(n_grid, n_grid).cpu()
+    return xs.numpy(), ys.numpy(), values.numpy()
 
 
 def scaled(values):
@@ -173,22 +178,28 @@ def weight_bars(ax, true, test, train, theme):
 # Build the eight 2D targets, their two splits, their exact marginals and their mode panels
 targets = {}
 for name, window in WINDOWS.items():
-    target = make(name)
+    target = make(name).to(device)
     test = target.test_samples(n=args.n_samples)
     train = target.train_samples(n=args.n_samples)
-    test_metrics, test_hist = target.compute_metrics(test, return_hist=True)
-    train_metrics, train_hist = target.compute_metrics(train, return_hist=True)
+    test_metrics, test_hist = target.compute_metrics(test, compute_standard_metrics=False,
+                                                     return_hist=True)
+    train_metrics, train_hist = target.compute_metrics(train, compute_standard_metrics=False,
+                                                       return_hist=True)
     xs, ys, values = log_density_grid(target.log_prob, window, window)
     px, py = grid_marginals(xs, ys, values)
     targets[name] = {
         'window': window, 'grid': xs, 'values': values, 'px': px, 'py': py,
-        'test': test.numpy(), 'train': train.numpy(),
-        'true': target.true_mode_weights[0].numpy(), 'test_hist': test_hist[0].numpy(),
-        'train_hist': train_hist[0].numpy(), 'test_metrics': test_metrics,
+        'test': test.cpu().numpy(), 'train': train.cpu().numpy(),
+        'true': target.true_mode_weights[0].cpu().numpy(), 'test_hist': test_hist[0].cpu().numpy(),
+        'train_hist': train_hist[0].cpu().numpy(), 'test_metrics': test_metrics,
         'train_metrics': train_metrics,
     }
-    print(name, 'tv_weights test %.3f train %.3f' % (test_metrics['tv_weights'],
-                                                      train_metrics['tv_weights']))
+    print(name, 'n test %d train %d' % (len(test), len(train)),
+          'tv_weights test %.3f train %.3f' % (test_metrics['tv_weights'],
+                                               train_metrics['tv_weights']))
+    print('    weights true', np.round(targets[name]['true'], 3))
+    print('    weights test', np.round(targets[name]['test_hist'], 3))
+    print('    weights train', np.round(targets[name]['train_hist'], 3))
 
 
 def draw_splits(theme):
@@ -226,22 +237,25 @@ def draw_splits(theme):
 
 save(draw_splits, 'synthetic_splits')
 
-# GMM-40 under two samplers that fail differently: the README's unadjusted Langevin loop, and one
-# random-walk Metropolis chain from the first mean
-gmm = build('gmm40')
-gen = generator(1)
-ula = gmm.prior_scale * torch.randn(args.n_samples, 2, generator=gen, dtype=torch.float64)
+# GMM-40 under the README's Langevin loop and one random-walk Metropolis chain
+gmm = build('gmm40').to(device)
+gmm_test = gmm.test_samples(n=args.n_samples)
+gen = generator(1, device=device)
+ula = gmm.prior_scale * torch.randn(len(gmm_test), 2, generator=gen, dtype=torch.float64,
+                                    device=device)
 for step in range(500):
     ula = ula + 0.05 * gmm.score(ula) + 0.1 ** 0.5 * torch.randn(ula.shape, generator=gen,
-                                                                 dtype=ula.dtype)
-chain = random_walk_mh(gmm.log_prob, gmm.means[:1].clone(), n_steps=50 * args.n_samples,
+                                                                 dtype=ula.dtype, device=device)
+gmm = gmm.cpu()
+chain = random_walk_mh(gmm.log_prob, gmm.means[:1].clone(), n_steps=50 * args.n_chain,
                        step_size=3.0, generator=generator(2), return_trace=True, thin=50)[:, 0]
 coverage = []
-for label, x in [('test split', gmm.test_samples(n=args.n_samples)),
-                 ('Langevin from the prior', ula), ('one Metropolis chain', chain)]:
+for label, x in [('test split', gmm_test), ('Langevin from the prior', ula),
+                 ('one Metropolis chain', chain)]:
     metrics, hist = gmm.compute_metrics(x, compute_standard_metrics=False, return_hist=True)
-    coverage.append({'label': label, 'hist': hist[0].numpy(), 'metrics': metrics})
-    print(label, {key: round(float(value), 3) for key, value in metrics.items()})
+    coverage.append({'label': label, 'n': len(x), 'hist': hist[0].numpy(), 'metrics': metrics})
+    print(label, 'n %d' % len(x), {key: round(float(value), 3) for key, value in metrics.items()},
+          'modes below 5%% of 1/40: %d' % (hist[0] < 0.05 / gmm.n_modes).sum())
 means = gmm.means.numpy()
 
 
@@ -265,7 +279,7 @@ def draw_mode_coverage(theme):
         ax.set_ylim(-46.0, 46.0)
         ax.set_aspect('equal')
         blank(ax)
-        ax.set_title(entry['label'])
+        ax.set_title('%s\nn = %s' % (entry['label'], format(entry['n'], ',')))
 
         # The empirical weights sorted from the heaviest, against the true one
         ax = axes[1, column]
@@ -292,12 +306,16 @@ def draw_mode_coverage(theme):
 save(draw_mode_coverage, 'synthetic_mode_coverage')
 
 # Neal's funnel: its first two coordinates, with the exact marginals of both
-funnel = build('funnel')
-funnel_splits = {'test': funnel.test_samples(n=args.n_samples).numpy(),
-                 'train': funnel.train_samples(n=args.n_samples).numpy()}
+funnel = build('funnel').to(device)
+funnel_splits = {'test': funnel.test_samples(n=args.n_samples).cpu().numpy(),
+                 'train': funnel.train_samples(n=args.n_samples).cpu().numpy()}
 funnel_metrics = {split: funnel.compute_metrics(torch.as_tensor(x), compute_standard_metrics=False)
                   for split, x in funnel_splits.items()}
-x1_window, x2_window = (-9.0, 9.0), (-12.0, 12.0)
+for split, x in funnel_splits.items():
+    print('funnel', split, 'n %d' % len(x), 'x1 range %.2f %.2f std %.2f' % (
+        x[:, 0].min(), x[:, 0].max(), x[:, 0].std()),
+          {key: round(float(value), 3) for key, value in funnel_metrics[split].items()})
+x1_window, x2_window = (-13.0, 13.0), (-12.0, 12.0)
 
 
 def funnel_log_prob(x):
@@ -327,7 +345,7 @@ def draw_funnel(theme):
     outer = fig.add_gridspec(1, 1)
     main, top, right, corner = joint(fig, outer[0, 0], ratio=0.22)
     draw_density(main, funnel_values, x1_window, x2_window, theme)
-    main.set_xticks([-8, -4, 0, 4, 8])
+    main.set_xticks([-12, -8, -4, 0, 4, 8, 12])
     main.set_yticks([-10, 0, 10])
     for spine in ['left', 'bottom']:
         main.spines[spine].set_visible(True)
@@ -352,17 +370,22 @@ def draw_funnel(theme):
 save(draw_funnel, 'synthetic_funnel')
 
 # ManyWell: one of its 16 double wells, the marginals pooled over wells, and the per-well weights
-manywell = build('manywell')
+manywell = build('manywell').to(device)
 well_splits = {'test': manywell.test_samples(n=args.n_samples),
                'train': manywell.train_samples(n=args.n_samples)}
 well_panels = {split: manywell.compute_metrics(x, compute_standard_metrics=False,
                                                return_hist=True)
                for split, x in well_splits.items()}
+for split, (metrics, hist) in well_panels.items():
+    print('manywell', split, 'n %d' % len(well_splits[split]),
+          {key: round(float(value), 4) for key, value in metrics.items()},
+          'left mass per well %.3f to %.3f' % (hist[:, 0].min(), hist[:, 0].max()))
 well_x1, well_x2 = (-2.6, 2.6), (-3.2, 3.2)
 well_grid_x1, well_grid_x2, well_values = log_density_grid(
     lambda x: manywell.log_prob_1d(x[:, 0]) - 0.5 * x[:, 1] ** 2, well_x1, well_x2)
 well_p1, well_p2 = grid_marginals(well_grid_x1, well_grid_x2, well_values)
-pooled = {split: {'x1': x[:, 0::2].reshape(-1).numpy(), 'x2': x[:, 1::2].reshape(-1).numpy()}
+pooled = {split: {'x1': x[:, 0::2].reshape(-1).cpu().numpy(),
+                  'x2': x[:, 1::2].reshape(-1).cpu().numpy()}
           for split, x in well_splits.items()}
 
 
@@ -379,14 +402,9 @@ def draw_manywell(theme):
     main.set_xlabel('$x_1$ (top: pooled over the 16 wells)')
     main.set_ylabel('$x_2$')
     draw_marginal(top, well_grid_x1, well_p1, {split: pooled[split]['x1'] for split in pooled},
-                  np.linspace(*well_x1, 161), theme, ceiling=3.0)
+                  np.linspace(*well_x1, 161), theme)
     draw_marginal(right, well_grid_x2, well_p2, {split: pooled[split]['x2'] for split in pooled},
-                  np.linspace(*well_x2, 161), theme, vertical=True, ceiling=1.2)
-
-    # 99% of the train chains never move from (1.75, 0), so both of its marginals are spikes
-    top.annotate('train: a spike at 1.75', xy=(1.75, 3.0), xytext=(-2.4, 2.0), color=theme['ink'],
-                 fontsize=7, arrowprops={'arrowstyle': '->', 'color': theme['muted'],
-                                         'linewidth': 0.8})
+                  np.linspace(*well_x2, 161), theme, vertical=True)
     rows = ['        test  train']
     for key in ['tvd_x1', 'w1_x1']:
         rows.append('%-6s %5.2f %6.2f' % (key, well_panels['test'][0][key],
@@ -398,15 +416,15 @@ def draw_manywell(theme):
     index = np.arange(manywell.n_wells)
     width = 0.4
     for offset, split in [(-width / 2, 'test'), (width / 2, 'train')]:
-        ax.bar(index + offset, well_panels[split][1][:, 0].numpy(), width, color=theme[split],
-               linewidth=0)
+        ax.bar(index + offset, well_panels[split][1][:, 0].cpu().numpy(), width,
+               color=theme[split], linewidth=0)
     true = float(manywell.true_mode_weights[0, 0])
     ax.axhline(true, color=theme['ink'], linewidth=1.2)
     ax.set_xticks(index[::3], [str(i + 1) for i in index[::3]])
     ax.set_xlabel('well')
     ax.set_ylabel('mass in the left well')
     ax.set_xlim(-0.6, manywell.n_wells - 0.4)
-    ax.set_ylim(0.0, 0.32)
+    ax.set_ylim(0.0, 0.75)
     ax.yaxis.grid(True, color=theme['grid'], linewidth=0.5)
     ax.set_axisbelow(True)
     rows = ['                     test  train']
@@ -414,7 +432,6 @@ def draw_manywell(theme):
         rows.append('%-20s %5.2f %6.2f' % (key, well_panels['test'][0][key],
                                           well_panels['train'][0][key]))
     note(ax, rows, theme, size=6.5)
-    ax.text(0.0, 0.205, 'train split: no sample in any left well', color=theme['ink'], fontsize=7.5)
     legend(fig, theme, [('target density', None, 'density'), ('exact marginal', None, 'fill'),
                         ('test split (exact draws)', 'test', 'line'),
                         ('train split', 'train', 'line'), ('true weight %.4f' % true, 'ink', 'line')])

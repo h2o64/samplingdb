@@ -8,15 +8,17 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, Normalize, to_rgb
 from samplingdb import build
 from samplingdb.targets.base import generator
-from samplingdb.targets.kernels import random_walk_mh
+from samplingdb.targets.kernels import temperature_ladder
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from common import blank, legend, pymol_render, save, save_gif, start_pymol
 
 # Parse the arguments
 parser = argparse.ArgumentParser()
-parser.add_argument('--n_samples', type=int, default=2048)
-parser.add_argument('--n_chain_steps', type=int, default=100000)
-parser.add_argument('--n_frames', type=int, default=100)
+parser.add_argument('--n_samples', type=int, default=None)
+parser.add_argument('--chains', type=int, nargs='+', default=[0, 500, 999])
+parser.add_argument('--trace_every', type=int, default=10)
+parser.add_argument('--frame_every', type=int, default=20)
+parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
 args = parser.parse_args()
 
 # Save the arguments in a dictionary
@@ -24,10 +26,10 @@ config = vars(args)
 
 # Print the config
 pprint.pprint(config)
-
-# A single chain is thousands of one-configuration calls, which threads only slow down
-torch.set_num_threads(1)
 start_pymol()
+
+# Chains, adaptation moves and thinning of the train recipe, whose split is laid out frame by frame
+N_CHAINS, N_ADAPT, THIN = 1000, 1000, 10
 
 # Neighbours are counted out to the first minimum of the Lennard-Jones pair distribution, at 1.4 r
 NEIGHBOUR_CUTOFF = 1.4
@@ -134,52 +136,75 @@ def outside_density(values, edges, x_window):
 # Build the three systems, their two splits and the train split's panel against the test split
 systems = {}
 for name in ['dw4', 'lj13', 'lj55']:
-    target = build(name)
+    target = build(name).to(args.device)
+    train = target.train_samples(n=args.n_samples).cpu()
+    target.cpu()
     test = target.test_samples(n=args.n_samples)
-    train = target.train_samples(n=args.n_samples)
     metrics, hist = target.compute_metrics(train, ref_samples=test, return_hist=True)
-    print(name, {key: round(float(value), 4) for key, value in metrics.items()})
-    systems[name] = {
-        'target': target, 'test': test, 'train': train, 'metrics': metrics, 'hist': hist,
-        'values': {'test': {'dist': target.distances(test).reshape(-1).numpy(),
-                            'energy': target.energy(test).numpy()},
-                   'train': {'dist': target.distances(train).reshape(-1).numpy(),
-                             'energy': target.energy(train).numpy()}},
-    }
+    values = {split: {'dist': target.distances(x).reshape(-1).cpu().numpy(),
+                      'energy': target.energy(x).cpu().numpy()}
+              for split, x in [('test', test), ('train', train)]}
+    systems[name] = {'target': target, 'test': test, 'train': train,
+                     'metrics': metrics, 'hist': hist, 'values': values}
 
-# A few DW-4 configurations of each split: the first test ones, and train states spread over the
-# chain, each turned onto its principal axes
+    # Print the counts, the panel and the energy ranges
+    low, high = target.energy_histogram_range
+    print(name, 'test', len(test), 'train', len(train))
+    print(name, {key: round(float(value), 4) for key, value in metrics.items()})
+    for split in ['test', 'train']:
+        energy = values[split]['energy']
+        print(name, split, 'energy range %.2f %.2f' % (energy.min(), energy.max()),
+              'mean %.2f' % energy.mean(), 'below %.0f %.4f%%' % (low, 100 * (energy < low).mean()),
+              'above %.0f %.4f%%' % (high, 100 * (energy > high).mean()))
+    energy, train_energy = values['test']['energy'], values['train']['energy']
+    outside = (energy < train_energy.min()) | (energy > train_energy.max())
+    print(name, 'test energies outside the train range', int(outside.sum()), energy[outside])
+
+# Locate the last kept frame of the train split and the temperature factor of every chain
+for entry in systems.values():
+    n_kept = len(entry['train']) // N_CHAINS
+    entry['last'] = (n_kept - 1) * N_CHAINS
+    entry['factors'] = temperature_ladder(N_CHAINS, entry['target'].train_temperatures).numpy()
+
+# Pick the first DW-4 test configurations and the last train state of chains spread over the ladder
 dw4 = systems['dw4']
 n_shown = 6
-picks = {'test': np.arange(n_shown),
-         'train': np.linspace(0, args.n_samples - 1, n_shown).astype(int)}
+dw4_chains = np.linspace(0, N_CHAINS - 1, n_shown).astype(int)
+picks = {'test': np.arange(n_shown), 'train': dw4['last'] + dw4_chains}
 dw4_shown = {split: [principal_frame(dw4[split][index].reshape(4, 2).numpy())
                      for index in picks[split]] for split in ['test', 'train']}
+print('dw4 shown train factors', np.round(dw4['factors'][dw4_chains], 2))
 
-# One configuration of each split for the two clusters: the test one at the median energy, and
-# the last state of the train chain. Each is oriented on its own principal axes, then all four are
-# drawn from the camera distance of the widest, so they share one scale
-cluster_positions, views = {}, {}
+# Render each cluster's median test configuration and the last state of its coldest and hottest
+# train chain, at one scale
+cluster_shown = []
 for name in ['lj13', 'lj55']:
     entry = systems[name]
-    n_particles = entry['target'].n_particles
     energy = entry['values']['test']['energy']
-    test_index = int(np.argsort(energy)[len(energy) // 2])
-    for split, index in [('test', test_index), ('train', args.n_samples - 1)]:
-        cluster_positions[name, split] = entry[split][index].reshape(n_particles, 3).numpy()
-        _, views[name, split] = render_cluster(cluster_positions[name, split], 64)
-distance = max(-view[11] for view in views.values())
-cluster_renders = {}
-for key, positions in cluster_positions.items():
-    view = list(views[key])
+    cluster_shown += [(name, 'test', int(np.argsort(energy)[len(energy) // 2]), None),
+                      (name, 'train', entry['last'], entry['factors'][0]),
+                      (name, 'train', entry['last'] + N_CHAINS - 1, entry['factors'][-1])]
+cluster_positions, cluster_energies, views = [], [], []
+for name, split, index, _ in cluster_shown:
+    entry = systems[name]
+    n_particles = entry['target'].n_particles
+    cluster_positions.append(entry[split][index].reshape(n_particles, 3).numpy())
+    cluster_energies.append(float(entry['values'][split]['energy'][index]))
+    views.append(render_cluster(cluster_positions[-1], 64)[1])
+print('cluster renders', [(name, split, round(energy, 2)) for (name, split, _, _), energy
+                          in zip(cluster_shown, cluster_energies)])
+distance = max(-view[11] for view in views)
+cluster_renders = []
+for positions, view in zip(cluster_positions, views):
+    view = list(view)
     view[11], view[15], view[16] = -distance, distance - 100.0, distance + 100.0
-    cluster_renders[key], _ = render_cluster(positions, 900, view=tuple(view))
+    cluster_renders.append(render_cluster(positions, 900, view=tuple(view))[0])
 
 
 def draw_configurations(theme):
-    """Draws DW-4 configurations of both splits and one render of each cluster per split"""
-    fig = plt.figure(figsize=(8.0, 5.3))
-    top, bottom = fig.subfigures(2, 1, height_ratios=[1.0, 1.05])
+    """Draws DW-4 configurations of both splits and three renders of each cluster"""
+    fig = plt.figure(figsize=(8.0, 4.9))
+    top, bottom = fig.subfigures(2, 1, height_ratios=[1.0, 0.85])
 
     # DW-4: four discs and their six pair distances
     axes = top.subplots(2, n_shown)
@@ -198,15 +223,21 @@ def draw_configurations(theme):
             blank(ax)
         axes[row, 0].set_ylabel(split + ' split', color=theme['ink'])
         axes[row, 0].yaxis.label.set_visible(True)
+    for ax, chain in zip(axes[1], dw4_chains):
+        ax.set_xlabel('T × %.2f' % dw4['factors'][chain], family='DejaVu Sans Mono', fontsize=8,
+                      color=theme['muted'])
     top.suptitle('dw4: four particles in 2D, pair distances drawn', fontsize=10)
 
-    # The two clusters, one render per split, with the coordination scale
-    axes = bottom.subplots(1, 4)
-    for ax, (name, split) in zip(axes, [('lj13', 'test'), ('lj13', 'train'),
-                                        ('lj55', 'test'), ('lj55', 'train')]):
-        ax.imshow(cluster_renders[name, split])
+    # The two clusters, with the coordination scale
+    axes = bottom.subplots(1, len(cluster_renders))
+    for ax, (name, split, _, factor), image, energy in zip(axes, cluster_shown, cluster_renders,
+                                                           cluster_energies):
+        ax.imshow(image)
         blank(ax)
-        ax.set_title(name + ', ' + split + ' split', family='DejaVu Sans Mono', fontsize=9)
+        label = name + ', test' if factor is None else name + ', T × %.2f' % factor
+        ax.set_title(label, family='DejaVu Sans Mono', fontsize=8)
+        ax.set_xlabel('E = %.1f' % energy, family='DejaVu Sans Mono', fontsize=8,
+                      color=theme['muted'])
     mappable = plt.cm.ScalarMappable(norm=Normalize(0, MAX_NEIGHBOURS), cmap=COORDINATION)
     bar = bottom.colorbar(mappable, ax=axes, orientation='horizontal', fraction=0.05,
                           shrink=0.4, aspect=30)
@@ -226,7 +257,7 @@ def draw_histograms(theme):
         metrics = entry['metrics']
         for column, key in enumerate(['dist', 'energy']):
             ax = axes[row, column]
-            edges = entry['hist'][key]['edges'].numpy()
+            edges = entry['hist'][key]['edges'].cpu().numpy()
             span = edges[-1] - edges[0]
             x_window = (edges[0] - 0.12 * span, edges[-1] + 0.12 * span)
 
@@ -277,66 +308,107 @@ def draw_histograms(theme):
 
 save(draw_histograms, 'particles_histograms')
 
-# The LJ-55 train split is one Metropolis chain from the lattice, burn-in included: rerun its
-# recipe in full and keep evenly spaced states for the animation
-lj55 = systems['lj55']['target']
-start = lj55.initial_configuration()[None].clone()
-trace = random_walk_mh(lj55.log_prob, start, n_steps=args.n_chain_steps,
-                       step_size=lj55.train_step_size, generator=generator(0),
-                       return_trace=True)[:, 0]
-trace = lj55.preprocess(trace)
-assert torch.allclose(trace[:args.n_samples], systems['lj55']['train'], atol=1e-5)
-chain_energy = lj55.energy(trace).numpy()
-steps = np.linspace(0, args.n_chain_steps - 1, args.n_frames).astype(int)
-print('lj55 chain energy at the frames', np.round(chain_energy[steps[::10]], 1), 'max', chain_energy.max())
+# Replay the adaptation moves of a few LJ-55 train chains, which the split does not keep
+lj55 = systems['lj55']['target'].to(args.device)
+chains = args.chains
+factors = systems['lj55']['factors'][chains]
+gen = generator(0, device=lj55.device)
+x0 = lj55.initial_configuration() + 0.1 * torch.randn(
+    N_CHAINS, lj55.dim, generator=gen, dtype=lj55.dtype, device=lj55.device)
+moves = list(range(0, N_ADAPT + 1, args.trace_every))
+states = [lj55.preprocess(x0[chains]).cpu()]
+for move in moves[1:]:
+    states.append(lj55.generate_train_samples(N_CHAINS, n_steps=move - 1, thin=1)[chains].cpu())
 
-# Render every frame once, rotated onto the first so the cluster does not tumble, from one view
-frames = []
-reference = trace[0].reshape(55, 3).numpy().astype(np.float64)
-view = None
-for step in steps:
-    positions = kabsch(trace[step].reshape(55, 3).numpy().astype(np.float64), reference)
-    image, view = render_cluster(positions, 360, view=view)
-    frames.append(image)
+# Read the kept states off the split, after checking the replay against it
+train = systems['lj55']['train']
+n_kept = len(train) // N_CHAINS
+kept = train[:n_kept * N_CHAINS].reshape(n_kept, N_CHAINS, lj55.dim)
+replay = lj55.generate_train_samples(N_CHAINS, n_steps=N_ADAPT, thin=THIN).cpu()
+assert torch.allclose(replay, kept[0], atol=1e-5)
+states = torch.stack(states + list(kept[:, chains]))
+moves = np.array(moves + [N_ADAPT + THIN * (j + 1) for j in range(n_kept)])
+chain_energy = lj55.energy(states.reshape(-1, lj55.dim).to(lj55.device))
+chain_energy = chain_energy.reshape(len(moves), len(chains)).cpu().numpy()
+
+# Print the chains' energies
 test_energy = systems['lj55']['values']['test']['energy']
-energy_window = (-380.0, -215.0)
-energy_bins = np.linspace(*energy_window, 133)
+train_energy = systems['lj55']['values']['train']['energy']
+print('lj55 chains', chains, 'factors', np.round(factors, 3))
+print('lj55 chain energy at the start', np.round(chain_energy[0], 1))
+for k, chain in enumerate(chains):
+    energy = chain_energy[moves > N_ADAPT, k]
+    print('lj55 chain', chain, 'kept energy mean %.1f sd %.1f min %.1f max %.1f' % (
+        energy.mean(), energy.std(), energy.min(), energy.max()),
+        'above the test max %.0f%%' % (100 * (energy > test_energy.max()).mean()),
+        'below the test min %.0f%%' % (100 * (energy < test_energy.min()).mean()))
+print('lj55 test energy range %.1f %.1f, train split %.1f %.1f' % (
+    test_energy.min(), test_energy.max(), train_energy.min(), train_energy.max()))
+
+# Render every shown state, each chain rotated onto its own start
+shown = np.nonzero(moves % args.frame_every == 0)[0]
+positions = states.numpy().astype(np.float64).reshape(len(moves), len(chains), 55, 3)
+frames = []
+view = None
+for index in shown:
+    images = []
+    for k in range(len(chains)):
+        image, view = render_cluster(kabsch(positions[index, k], positions[0, k]), 300, view=view)
+        images.append(image)
+    frames.append(images)
+energy_window = (-395.0, -195.0)
+energy_bins = np.linspace(*energy_window, 101)
+energy_width = energy_bins[1] - energy_bins[0]
+split_density = {split: np.histogram(energy, bins=energy_bins)[0] / len(energy) / energy_width
+                 for split, energy in [('test', test_energy), ('train', train_energy)]}
+occupied = np.nonzero(split_density['train'])[0]
+occupied = slice(occupied[0], occupied[-1] + 1)
 
 
 def draw_chain_frame(theme, index):
-    """Draws one state of the LJ-55 train chain next to its energy so far"""
+    """Draws one state of each shown LJ-55 train chain next to its energy so far"""
     index = min(index, len(frames) - 1)
-    fig, axes = plt.subplots(1, 3, figsize=(6.4, 2.7),
-                             gridspec_kw={'width_ratios': [1.0, 1.25, 0.32]})
-    ax = axes[0]
-    ax.imshow(frames[index])
-    blank(ax)
-    ax.set_title('step %d' % steps[index], family='DejaVu Sans Mono', fontsize=9)
+    state = shown[index]
+    fig, axes = plt.subplots(len(chains), 3, figsize=(6.4, 1.95 * len(chains) + 0.4),
+                             gridspec_kw={'width_ratios': [1.0, 1.55, 0.38]})
+    for row, factor in enumerate(factors):
+        ax = axes[row, 0]
+        ax.imshow(frames[index][row])
+        blank(ax)
+        ax.set_title('T × %.2f' % factor, family='DejaVu Sans Mono', fontsize=9)
 
-    # The chain's energy so far, the current state marked
-    ax = axes[1]
-    ax.plot(np.arange(steps[index] + 1), chain_energy[:steps[index] + 1], color=theme['train'],
-            linewidth=1.0)
-    ax.plot(steps[index], chain_energy[steps[index]], 'o', color=theme['train'], markersize=4)
-    ax.set_xlim(0, args.n_chain_steps)
-    ax.set_ylim(*energy_window)
-    ax.set_xticks([0, args.n_chain_steps // 2, args.n_chain_steps],
-                  ['0', '%dk' % (args.n_chain_steps // 2000), '%dk' % (args.n_chain_steps // 1000)])
-    ax.set_xlabel('Metropolis step')
-    ax.set_ylabel('energy')
-    ax.yaxis.grid(True, color=theme['grid'], linewidth=0.5)
-    ax.set_title('train chain', fontsize=9)
+        # The chain's energy so far, the current state marked
+        ax = axes[row, 1]
+        ax.axvspan(0, N_ADAPT, color=theme['grid'], alpha=0.5, linewidth=0)
+        ax.plot(moves[:state + 1], chain_energy[:state + 1, row], color=theme['train'],
+                linewidth=1.0)
+        if chain_energy[state, row] > energy_window[1]:
+            ax.plot(moves[state], energy_window[1], '^', color=theme['train'], markersize=5,
+                    clip_on=False)
+        else:
+            ax.plot(moves[state], chain_energy[state, row], 'o', color=theme['train'],
+                    markersize=4)
+        ax.set_xlim(0, moves[-1])
+        ax.set_ylim(*energy_window)
+        ax.set_ylabel('energy')
+        ax.yaxis.grid(True, color=theme['grid'], linewidth=0.5)
+        if row == len(chains) - 1:
+            ax.set_xlabel('MALA move')
+        else:
+            ax.set_xticklabels([])
 
-    # The test split's energies, on the same axis
-    ax = axes[2]
-    ax.hist(test_energy, bins=energy_bins, orientation='horizontal', color=theme['test'],
-            linewidth=0)
-    ax.set_ylim(*energy_window)
-    ax.set_yticks([])
-    ax.set_xticks([])
-    ax.spines['left'].set_visible(False)
-    ax.spines['bottom'].set_visible(False)
-    ax.set_title('test split', fontsize=9)
+        # Both splits' energies, on the same axis
+        ax = axes[row, 2]
+        ax.stairs(split_density['test'], energy_bins, orientation='horizontal', fill=True,
+                  color=theme['test'], linewidth=0)
+        ax.stairs(split_density['train'][occupied], energy_bins[occupied.start:occupied.stop + 1],
+                  orientation='horizontal', color=theme['train'], linewidth=1.0)
+        ax.set_ylim(*energy_window)
+        blank(ax)
+    axes[0, 1].set_title('move %d' % moves[state], family='DejaVu Sans Mono', fontsize=9)
+    legend(fig, theme, [('test split', 'test', 'patch'),
+                        ('train chain, train split', 'train', 'line'),
+                        ('adaptation, not kept', 'grid', 'patch')])
     return fig
 
 

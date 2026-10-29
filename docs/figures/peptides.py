@@ -1,7 +1,7 @@
 # Draw the figures of the peptides' page
 
 # Libraries
-import argparse, math, pprint, sys, pathlib, tempfile
+import argparse, inspect, math, pprint, sys, pathlib, tempfile
 import numpy as np
 import torch
 import mdtraj
@@ -11,15 +11,17 @@ from matplotlib.colors import BoundaryNorm, ListedColormap, to_rgb
 from matplotlib.patheffects import withStroke
 from scipy.ndimage import gaussian_filter
 from samplingdb import build
-from samplingdb.metrics import histogram_2d, kmeans, subsample
+from samplingdb.metrics import kmeans, subsample
+from samplingdb.targets.kernels import temperature_ladder
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from common import blank, density_map, legend, note, pymol_render, save, save_gif, start_pymol
 
 # Parse the arguments
 parser = argparse.ArgumentParser()
-parser.add_argument('--n_samples', type=int, default=2000)
-parser.add_argument('--n_background', type=int, default=100000)
-parser.add_argument('--stride', type=int, default=10)
+parser.add_argument('--n_test', type=int, default=None)
+parser.add_argument('--n_train', type=int, default=None)
+parser.add_argument('--stride', type=int, default=1)
+parser.add_argument('--device', type=str, default='cuda')
 args = parser.parse_args()
 
 # Save the arguments in a dictionary
@@ -181,14 +183,13 @@ def density_bar(fig, cax, theme, depth=1.0):
     bar.set_label('density, fraction of its peak', fontsize=7.5)
 
 
-def marginal(ax, edges, fill, test, train, theme, horizontal=False):
-    """Draws one coordinate's marginal: the whole test split as a fill, the two scored sets on top
+def marginal(ax, edges, test, train, theme, horizontal=False):
+    """Draws one coordinate's marginal in both splits
 
     Args:
         * ax (matplotlib.axes.Axes): Axis
         * edges (numpy.ndarray of shape (n_bins + 1,)): Bin edges
-        * fill (numpy.ndarray): Values of the whole test split
-        * test (numpy.ndarray): Values of the scored test rows
+        * test (numpy.ndarray): Values of the test split
         * train (numpy.ndarray): Values of the train split
         * theme (dict): Theme
         * horizontal (bool): Whether the coordinate runs vertically, for a right-hand marginal
@@ -197,11 +198,9 @@ def marginal(ax, edges, fill, test, train, theme, horizontal=False):
     orientation = 'horizontal' if horizontal else 'vertical'
     width = edges[1] - edges[0]
     density = [np.histogram(values, bins=edges)[0] / len(values) / width
-               for values in [fill, test, train]]
-    ax.stairs(density[0], edges, fill=True, color=density_map(theme)(0.45),
-              orientation=orientation)
-    ax.stairs(density[1], edges, color=theme['test'], linewidth=1.1, orientation=orientation)
-    ax.stairs(density[2], edges, color=theme['train'], linewidth=1.1, orientation=orientation)
+               for values in [test, train]]
+    ax.stairs(density[0], edges, color=theme['test'], linewidth=1.1, orientation=orientation)
+    ax.stairs(density[1], edges, color=theme['train'], linewidth=1.1, orientation=orientation)
     peak = 1.1 * max(values.max() for values in density)
     if horizontal:
         ax.set_xlim(0.0, peak)
@@ -221,21 +220,27 @@ def basin(phi, psi):
     return np.where(phi > 0, 2, np.where(alpha_r, 1, 0))
 
 
-# Build the four peptides, on the CPU and without compiling: every call here is a one-off
+def spaced(n):
+    """Writes a count with a space between thousands, as the docs pages do"""
+    return '{:,}'.format(n).replace(',', ' ')
+
+
+# Build the four peptides on the GPU
 start_pymol()
-targets = {name: build(name, compile=False) for name in NAMES}
+targets = {name: build(name).to(args.device) for name in NAMES}
 aldp = targets['ace-a-nme-T300']
 topologies = {name: mdtraj.Topology.from_openmm(target.topology)
               for name, target in targets.items()}
 
-# One test structure per peptide, the one whose radius of gyration is the median
+# Pick the test structure of median radius of gyration
 structures = {}
 for name, target in targets.items():
-    x = 10.0 * target.positions(target.test_samples(n=args.n_samples)).numpy()
+    x = 10.0 * target.positions(target.test_samples(n=args.n_test)).cpu().numpy()
     radius = np.sqrt(((x - x.mean(1, keepdims=True)) ** 2).sum(-1).mean(-1))
     frame = x[np.argsort(radius)[len(radius) // 2]]
     centre, rotation = principal_frame(frame)
     structures[name] = (frame - centre) @ rotation
+    print(name, 'test split', len(x), 'frames')
 
 # A common scale: the image height in Angstrom that fits the largest of the four
 panel_width, panel_height, margin = 760, 420, 2.4
@@ -282,23 +287,26 @@ def draw_molecules(theme):
 
 save(draw_molecules, 'peptides_molecules')
 
-# The splits of Ace-A-Nme and the panel that compares them
-test = aldp.test_samples(n=args.n_samples)
-train = aldp.train_samples(n=args.n_samples)
-metrics, hist = aldp.compute_metrics(train, return_hist=True)
+# Score the train split of Ace-A-Nme against its test split
+test = aldp.test_samples(n=args.n_test)
+train = aldp.train_samples(n=args.n_train)
+print('Ace-A-Nme: test split %d frames, train split %d frames' % (len(test), len(train)))
+metrics = aldp.compute_metrics(train, ref_samples=test)
 pprint.pprint({key: round(float(value), 4) for key, value in metrics.items()})
 
-# The test split's Ramachandran density, from every structure of it
-background = aldp.test_samples(n=args.n_background)
-background_angles = np.rad2deg(aldp.torsions(background).numpy())
-test_angles = np.rad2deg(aldp.torsions(test).numpy())
-train_angles = np.rad2deg(aldp.torsions(train).numpy())
-background_basins = np.bincount(basin(*background_angles.T), minlength=3) / len(background)
+# Count the backbone basins of each split
+test_angles = np.rad2deg(aldp.torsions(test).cpu().numpy())
+train_angles = np.rad2deg(aldp.torsions(train).cpu().numpy())
+test_basins = np.bincount(basin(*test_angles.T), minlength=3) / len(test)
 train_basins = np.bincount(basin(*train_angles.T), minlength=3) / len(train)
-print('test split basins (beta/PII, alpha-R, alpha-L)', np.round(background_basins, 3))
-print('train split basins (beta/PII, alpha-R, alpha-L)', np.round(train_basins, 3))
-angle_edges = np.linspace(-180.0, 180.0, 91)
-rama_density = density(background_angles, angle_edges, angle_edges, periodic=True)
+print('test split basins (beta/PII, alpha-R, alpha-L)', np.round(test_basins, 4))
+print('train split basins (beta/PII, alpha-R, alpha-L)', np.round(train_basins, 4))
+
+# Estimate the Ramachandran densities
+angle_edges = np.linspace(-180.0, 180.0, 121)
+rama_densities = {'test': density(test_angles, angle_edges, angle_edges, periodic=True),
+                  'train': density(train_angles, angle_edges, angle_edges, periodic=True)}
+marginal_edges = np.linspace(-180.0, 180.0, 181)
 
 # Where the basin labels of a Ramachandran plane sit
 BASINS = [(r'$\beta$', -175.0, 105.0), (r'$\alpha_R$', -25.0, -45.0), (r'$\alpha_L$', 92.0, 30.0)]
@@ -319,134 +327,136 @@ def rama_axes(ax, equal=True):
         ax.set_aspect('equal')
 
 
-# The trajectory: every stride-th frame of the one 100 ps train trajectory, superposed on the
-# backbone heavy atoms of the first and drawn in that frame's principal axes
-frames = 10.0 * aldp.positions(train[args.stride - 1::args.stride]).numpy()
-times = 0.05 * (np.arange(len(train))[args.stride - 1::args.stride] + 1)
-trajectory = mdtraj.Trajectory(frames / 10.0, topologies['ace-a-nme-T300'])
-trajectory.superpose(trajectory, 0, atom_indices=topologies['ace-a-nme-T300'].select('backbone'))
-frames = 10.0 * trajectory.xyz
-centre, rotation = principal_frame(frames[0])
-frames = (frames - centre) @ rotation
-frame_angles = np.rad2deg(aldp.torsions(torch.as_tensor(frames.reshape(len(frames), -1) / 10.0))
-                          .numpy())
-gif_width, gif_height = 520, 470
-gif_extent = max(max(np.ptp(x[:, 1]) + 2 * margin,
-                     (np.ptp(x[:, 0]) + 2 * margin) * gif_height / gif_width) for x in frames)
-frame_renders = [render(topologies['ace-a-nme-T300'], x, gif_width, gif_height, gif_extent,
-                        ball_and_stick([phi_bond, psi_bond])) for x in frames]
-print('trajectory: %d frames over %.1f ps' % (len(frames), times[-1]))
-
-
-def draw_trajectory_frame(theme, index):
-    """Draws one frame: the train structure at that time, and its angles over the test split"""
-    fig = plt.figure(figsize=(5.4, 2.75), layout='none')
-
-    # The structure, rendered once and laid on either surface
-    ax = fig.add_axes([0.0, 0.0, 0.5, 0.9])
-    ax.imshow(frame_renders[index], extent=(0, gif_width, gif_height, 0))
-    blank(ax)
-    fig.text(0.02, 0.95, 'Ace-A-Nme, train split', color=theme['ink'], fontsize=9, va='top')
-    fig.text(0.02, 0.84, 't = %5.1f ps' % times[index], color=theme['muted'], fontsize=8.5,
-             va='top', family='DejaVu Sans Mono')
-
-    # The angles, with a trail of the last 12 ps that fades and breaks where an angle wraps
-    ax = fig.add_axes([0.6, 0.17, 0.34, 0.68])
-    draw_density(ax, rama_density, angle_edges, angle_edges, theme, depth=0.6)
-    rama_axes(ax)
-    ax.set_xticks([-180, 0, 180])
-    ax.set_yticks([-180, 0, 180])
-    ax.set_xlabel(r'$\varphi$ (deg)')
-    ax.set_ylabel(r'$\psi$ (deg)')
-    start = max(index - 24, 0)
-    for k in range(start, index):
-        step = np.abs(frame_angles[k + 1] - frame_angles[k])
-        if (step < 180).all():
-            alpha = 0.15 + 0.85 * (k - start + 1) / max(index - start, 1)
-            ax.plot(frame_angles[k:k + 2, 0], frame_angles[k:k + 2, 1], color=theme['train'],
-                    linewidth=1.4, alpha=alpha, solid_capstyle='round')
-    ax.scatter(*frame_angles[index], s=34, color=theme['train'], edgecolors=theme['surface'],
-               linewidths=1.0, zorder=3)
-    for label, phi, psi in BASINS:
-        ax.text(phi, psi, label, color=theme['ink'], fontsize=9, ha='left', va='center',
-                path_effects=halo(theme))
-    ax.set_title('test split density', fontsize=9)
-    return fig
-
-
-save_gif(draw_trajectory_frame, len(frames), 'peptides_trajectory', fps=12)
-
-# The 32 x 32 grid js_ramachandran is computed on, from the same rows the panel scored
-joint_edges = torch.linspace(-math.pi, math.pi, 33, dtype=torch.float64)
-pair = aldp.ramachandran_pairs[0]
-ref_joint = histogram_2d(aldp.torsions(test).double()[:, pair], joint_edges).numpy()
-joint = histogram_2d(aldp.torsions(train).double()[:, pair], joint_edges).numpy()
-print('occupancy recomputed %.4f' % (ref_joint > 0).mean())
-marginal_edges = np.linspace(-180.0, 180.0, 129)
-
-
 def draw_ramachandran(theme):
-    """Draws the test split's Ramachandran density with both splits' torsion marginals, and
-    the 32 x 32 cells js_ramachandran compares the two splits on"""
-    fig, axes = plt.subplot_mosaic([['phi', 'numbers', '.'], ['centre', 'psi', 'grid']],
-                                   figsize=(8.0, 4.7), width_ratios=[4.0, 1.0, 4.2],
+    """Draws the Ramachandran density of each split, with both splits' torsion marginals"""
+    fig, axes = plt.subplot_mosaic([['phi', 'numbers', '.'], ['test', 'train', 'psi']],
+                                   figsize=(8.0, 4.4), width_ratios=[4.0, 4.0, 1.0],
                                    height_ratios=[1.0, 4.0])
 
-    # The density of the whole test split, and the two marginals the KL and W1 compare
-    ax = axes['centre']
-    draw_density(ax, rama_density, angle_edges, angle_edges, theme)
-    rama_axes(ax, equal=False)
-    ax.set_xlabel(r'$\varphi$ (deg)')
-    ax.set_ylabel(r'$\psi$ (deg)')
-    for label, phi, psi in BASINS:
-        ax.text(phi, psi, label, color=theme['ink'], fontsize=9, va='center',
-                path_effects=halo(theme))
-    density_bar(fig, ax.inset_axes([0.55, 0.1, 0.4, 0.035]), theme)
-    marginal(axes['phi'], marginal_edges, background_angles[:, 0], test_angles[:, 0],
-             train_angles[:, 0], theme)
+    # Draw one density per split
+    for key, angles, shares in [('test', test_angles, test_basins),
+                                ('train', train_angles, train_basins)]:
+        ax = axes[key]
+        draw_density(ax, rama_densities[key], angle_edges, angle_edges, theme)
+        rama_axes(ax, equal=False)
+        ax.set_xlabel(r'$\varphi$ (deg)')
+        ax.set_title('%s split, %s frames' % (key, spaced(len(angles))), fontsize=9)
+        for (symbol, phi, psi), share in zip(BASINS, shares):
+            ax.text(phi, psi, '%s %.1f%%' % (symbol, 100 * share), color=theme['ink'],
+                    fontsize=9, va='center', path_effects=halo(theme))
+    axes['test'].set_ylabel(r'$\psi$ (deg)')
+    axes['train'].tick_params(labelleft=False)
+    density_bar(fig, axes['test'].inset_axes([0.55, 0.15, 0.4, 0.035]), theme)
+
+    # Draw the marginals and the metrics
+    marginal(axes['phi'], marginal_edges, test_angles[:, 0], train_angles[:, 0], theme)
     axes['phi'].set_xlim(-180, 180)
-    marginal(axes['psi'], marginal_edges, background_angles[:, 1], test_angles[:, 1],
-             train_angles[:, 1], theme, horizontal=True)
+    marginal(axes['psi'], marginal_edges, test_angles[:, 1], train_angles[:, 1], theme,
+             horizontal=True)
     axes['psi'].set_ylim(-180, 180)
     ax = axes['numbers']
     blank(ax)
     note(ax, ['kl_phi1 %5.2f' % metrics['kl_phi1'], 'w1_phi1 %5.2f' % metrics['w1_phi1'],
               'kl_psi1 %5.2f' % metrics['kl_psi1'], 'w1_psi1 %5.2f' % metrics['w1_psi1']],
          theme, loc='lower left', size=6.5)
-
-    # The 32 x 32 cells: the ones the test rows fill, and the train split's mass as dots
-    ax = axes['grid']
-    width = 360.0 / 32
-    occupied = np.where(ref_joint > 0, 0.45, 0.0)
-    ax.imshow(occupied.T, origin='lower', extent=(-180, 180, -180, 180), cmap=density_map(theme),
-              vmin=0.0, vmax=1.0)
-    centres = -180.0 + width * (np.arange(32) + 0.5)
-    rows, cols = np.nonzero(joint)
-    ax.scatter(centres[rows], centres[cols], s=3.0 + 60.0 * joint[rows, cols] / joint.max(),
-               color=theme['train'], linewidths=0)
-    for line in np.linspace(-180, 180, 33):
-        ax.axvline(line, color=theme['grid'], linewidth=0.3)
-        ax.axhline(line, color=theme['grid'], linewidth=0.3)
-    rama_axes(ax)
-    ax.set_xlabel(r'$\varphi$ (deg)')
-    ax.set_title('the 32 x 32 cells scored', fontsize=9)
     note(ax, ['js_ramachandran        %.2f' % metrics['js_ramachandran'],
               'ramachandran_occupancy %.2f' % metrics['ramachandran_occupancy']], theme,
          loc='lower right', size=6.5)
-    legend(fig, dict(theme, fill=density_map(theme)(0.45)),
-           [('whole test split', 'fill', 'patch'),
-                        ('test split, %d rows' % len(test), 'test', 'line'),
-                        ('train split, %d rows' % len(train), 'train', 'line')])
+    legend(fig, theme, [('test split', 'test', 'line'), ('train split', 'train', 'line')])
     return fig
 
 
 save(draw_ramachandran, 'peptides_ramachandran')
 
+# Pick one train trajectory per basin
+recipe = {key: value.default for key, value
+          in inspect.signature(aldp.generate_train_samples).parameters.items()}
+n_chains = recipe['n_chains']
+n_frames = len(train) // n_chains
+factors = temperature_ladder(n_chains, aldp.train_temperatures).numpy()
+times = 0.001 * (recipe['n_steps'] + recipe['thin'] * np.arange(1, n_frames + 1))[::args.stride]
+labels = basin(*train_angles[:n_frames * n_chains].T).reshape(n_frames, n_chains)
+movies = []
+for label, (symbol, _, _) in enumerate(BASINS):
+    members = np.flatnonzero(labels[0] == label)
+    chain = members[np.argmin(np.abs(np.log(factors[members])))]
+    rows = train[chain:n_frames * n_chains:n_chains][::args.stride]
+
+    # Superpose the frames
+    trajectory = mdtraj.Trajectory(aldp.positions(rows).cpu().numpy(),
+                                   topologies['ace-a-nme-T300'])
+    trajectory.superpose(trajectory, 0,
+                         atom_indices=topologies['ace-a-nme-T300'].select('backbone'))
+    frames = 10.0 * trajectory.xyz
+    centre, rotation = principal_frame(frames[0])
+    movies.append({'symbol': symbol, 'frames': (frames - centre) @ rotation,
+                   'temperature': factors[chain] * aldp.temperature,
+                   'angles': train_angles[chain:n_frames * n_chains:n_chains][::args.stride]})
+    print('trajectory %s: chain %d at factor %.3f, %.2f of its frames in the basin'
+          % (symbol, chain, factors[chain], (labels[:, chain] == label).mean()))
+
+# Render the frames
+gif_width, gif_height, gif_margin = 360, 400, 1.2
+gif_extent = max(max(np.ptp(x[:, 1]) + 2 * gif_margin,
+                     (np.ptp(x[:, 0]) + 2 * gif_margin) * gif_height / gif_width)
+                 for movie in movies for x in movie['frames'])
+for movie in movies:
+    movie['renders'] = [render(topologies['ace-a-nme-T300'], x, gif_width, gif_height,
+                               gif_extent, ball_and_stick([phi_bond, psi_bond]))
+                        for x in movie['frames']]
+print('trajectory: %d frames from %.2f to %.2f ps after the release'
+      % (len(times), times[0], times[-1]))
+
+
+def draw_trajectory_frame(theme, index):
+    """Draws one frame: three train structures at that time, and their angles over the test
+    split's density"""
+    fig = plt.figure(figsize=(8.0, 3.0), layout='none')
+    fig.text(0.01, 0.96, 'Ace-A-Nme, train split', color=theme['ink'], fontsize=9, va='top')
+    fig.text(0.01, 0.88, 't = %5.2f ps after the release' % times[index], color=theme['muted'],
+             fontsize=8.5, va='top', family='DejaVu Sans Mono')
+
+    # Draw the three structures
+    for k, movie in enumerate(movies):
+        ax = fig.add_axes([0.01 + 0.215 * k, 0.1, 0.205, 0.68])
+        ax.imshow(movie['renders'][index], extent=(0, gif_width, gif_height, 0))
+        blank(ax)
+        ax.text(0.5, -0.02, '%s, %d K' % (movie['symbol'], round(movie['temperature'])),
+                transform=ax.transAxes, ha='center', va='top', color=theme['ink'], fontsize=9)
+
+    # Draw the angles and their trails
+    ax = fig.add_axes([0.725, 0.16, 0.24, 0.7])
+    draw_density(ax, rama_densities['test'], angle_edges, angle_edges, theme, depth=0.6)
+    rama_axes(ax)
+    ax.set_xticks([-180, 0, 180])
+    ax.set_yticks([-180, 0, 180])
+    ax.set_xlabel(r'$\varphi$ (deg)')
+    ax.set_ylabel(r'$\psi$ (deg)')
+    start = max(index - 24 // args.stride, 0)
+    for movie in movies:
+        angles = movie['angles']
+        for k in range(start, index):
+            step = np.abs(angles[k + 1] - angles[k])
+            if (step < 180).all():
+                alpha = 0.15 + 0.85 * (k - start + 1) / max(index - start, 1)
+                ax.plot(angles[k:k + 2, 0], angles[k:k + 2, 1], color=theme['train'],
+                        linewidth=1.4, alpha=alpha, solid_capstyle='round')
+        ax.scatter(*angles[index], s=30, color=theme['train'], edgecolors=theme['surface'],
+                   linewidths=1.0, zorder=3)
+    for symbol, phi, psi in BASINS:
+        ax.text(phi, psi, symbol, color=theme['ink'], fontsize=9, ha='left', va='center',
+                path_effects=halo(theme))
+    ax.set_title('test split density', fontsize=9)
+    return fig
+
+
+save_gif(draw_trajectory_frame, len(times), 'peptides_trajectory', fps=12)
+
 # The chirality centre seen down its bond to the carbonyl carbon, which points away from the
 # viewer, so its other three bonds fan out around it; the mirror image reflects x -> -x
 centre_atom, *partners = aldp.chirality_centres[0].tolist()
 carbonyl = psi_atoms[2]
-x = 10.0 * aldp.positions(test[:1]).numpy()[0]
+x = 10.0 * aldp.positions(test[:1]).cpu().numpy()[0]
 away = x[centre_atom] - x[carbonyl]
 away /= np.linalg.norm(away)
 up = x[partners[0]] - x[centre_atom]
@@ -455,11 +465,10 @@ up /= np.linalg.norm(up)
 frame_ = np.stack([np.cross(up, away), up, away], axis=-1)
 left = (x - x[centre_atom]) @ frame_
 right = left * np.array([-1.0, 1.0, 1.0])
-pair_positions = torch.as_tensor(np.stack([left, right]).reshape(2, -1) / 10.0,
-                                 dtype=torch.float32)
-pair_energy = aldp.energy(pair_positions).numpy()
-signs = aldp.chirality_signs(pair_positions).numpy()[:, 0]
-test_signs = aldp.chirality_signs(test).numpy()[:, 0]
+pair_positions = aldp.cast(torch.as_tensor(np.stack([left, right]).reshape(2, -1) / 10.0))
+pair_energy = aldp.energy(pair_positions).detach().cpu().numpy()
+signs = aldp.chirality_signs(pair_positions).cpu().numpy()[:, 0]
+test_signs = aldp.chirality_signs(test).cpu().numpy()[:, 0]
 print('mirror pair energies (kT)', pair_energy, 'signs', signs,
       'test split sign -1 fraction %.4f' % (test_signs < 0).mean())
 chiral_extent = 0.55 * extent
@@ -528,19 +537,22 @@ generator = torch.Generator().manual_seed(0)
 n = min(len(train), len(test), 2000)
 cut = subsample(train, n, generator=generator)
 ref_cut = subsample(test, n, generator=generator)
-centres = kmeans(model(aldp.tica_features(ref_cut)).detach(), n_clusters=20).numpy()
-background_tics = model(aldp.tica_features(background)).detach().numpy()
-test_tics = model(aldp.tica_features(test)).detach().numpy()
-train_tics = model(aldp.tica_features(train)).detach().numpy()
-tic_lower = np.quantile(background_tics, 0.0005, axis=0)
-tic_upper = np.quantile(background_tics, 0.9995, axis=0)
+centres = kmeans(model(aldp.tica_features(ref_cut)).detach(), n_clusters=20).cpu().numpy()
+test_tics = model(aldp.tica_features(test)).detach().cpu().numpy()
+train_tics = model(aldp.tica_features(train)).detach().cpu().numpy()
+tic_lower = np.minimum(np.quantile(test_tics, 0.0005, axis=0),
+                       np.quantile(train_tics, 0.0005, axis=0))
+tic_upper = np.maximum(np.quantile(test_tics, 0.9995, axis=0),
+                       np.quantile(train_tics, 0.9995, axis=0))
 pad = 0.06 * (tic_upper - tic_lower)
 tic_lower, tic_upper = tic_lower - pad, tic_upper + pad
-x_edges = np.linspace(tic_lower[0], tic_upper[0], 121)
-y_edges = np.linspace(tic_lower[1], tic_upper[1], 121)
-tic_density = density(background_tics, x_edges, y_edges, periodic=False)
+x_edges = np.linspace(tic_lower[0], tic_upper[0], 161)
+y_edges = np.linspace(tic_lower[1], tic_upper[1], 161)
+tic_density = density(test_tics, x_edges, y_edges, periodic=False)
 print('tica ranges', tic_lower, tic_upper, 'spread ratio %.0f'
-      % (background_tics[:, 0].std() / background_tics[:, 1].std()))
+      % (test_tics[:, 0].std() / test_tics[:, 1].std()))
+print('TIC 1 below -3: test %.4f, train %.4f'
+      % ((test_tics[:, 0] < -3).mean(), (train_tics[:, 0] < -3).mean()))
 
 # The cells: which centre is closest at every point of a fine grid, in the panel's coordinates.
 # They split the plane along TIC 1 when every column of the grid falls in one cell
@@ -552,19 +564,19 @@ print('grid columns lying in a single cell: %.4f' % (cell == cell[:1]).all(0).me
 borders = grid_x[1:][cell[len(grid_y) // 2, 1:] != cell[len(grid_y) // 2, :-1]]
 
 # One test structure per basin, the one closest to that basin's median TICA coordinates
-background_labels = basin(*background_angles.T)
+test_labels = basin(*test_angles.T)
 insets = []
 for label, (symbol, _, _) in enumerate(BASINS):
-    members = np.nonzero(background_labels == label)[0]
-    middle = np.median(background_tics[members], axis=0)
+    members = np.nonzero(test_labels == label)[0]
+    middle = np.median(test_tics[members], axis=0)
     scale = tic_upper - tic_lower
-    pick = members[np.argmin((((background_tics[members] - middle) / scale) ** 2).sum(-1))]
-    x = 10.0 * aldp.positions(background[pick:pick + 1]).numpy()[0]
+    pick = members[np.argmin((((test_tics[members] - middle) / scale) ** 2).sum(-1))]
+    x = 10.0 * aldp.positions(test[pick:pick + 1]).cpu().numpy()[0]
     x_centre, x_rotation = principal_frame(x)
     image = render(topologies['ace-a-nme-T300'], (x - x_centre) @ x_rotation, 360, 270,
                    0.62 * extent, ball_and_stick())
-    insets.append({'symbol': symbol, 'tic': background_tics[pick], 'image': image})
-    print('inset', symbol, 'at', np.round(background_tics[pick], 4))
+    insets.append({'symbol': symbol, 'tic': test_tics[pick], 'image': image})
+    print('inset', symbol, 'at', np.round(test_tics[pick], 4))
 
 
 def draw_tica(theme):
@@ -585,7 +597,8 @@ def draw_tica(theme):
     ax.set_ylim(tic_lower[1], tic_upper[1])
     ax.set_xlabel('TIC 1')
     ax.set_ylabel('TIC 2')
-    density_bar(fig, ax.inset_axes([0.27, 0.08, 0.26, 0.035]), theme)
+    ax.set_title('test split, %s frames' % spaced(len(test)), fontsize=9)
+    density_bar(fig, ax.inset_axes([0.27, 0.12, 0.26, 0.035]), theme)
 
     # One structure per basin, in the empty band between the alpha-L island and the rest
     for k, inset in enumerate(sorted(insets, key=lambda inset: inset['tic'][0])):
@@ -596,22 +609,17 @@ def draw_tica(theme):
                  fontsize=9, ha='center', va='top')
 
     # The marginals, with the cell borders on TIC 1, the one coordinate the cells split
-    marginal(axes['tic1'], x_edges, background_tics[:, 0], test_tics[:, 0], train_tics[:, 0],
-             theme)
+    marginal(axes['tic1'], x_edges, test_tics[:, 0], train_tics[:, 0], theme)
     axes['tic1'].set_xlim(tic_lower[0], tic_upper[0])
     for border in borders:
         axes['tic1'].axvline(border, color=theme['muted'], linewidth=0.5)
-    marginal(axes['tic2'], y_edges, background_tics[:, 1], test_tics[:, 1], train_tics[:, 1],
-             theme, horizontal=True)
+    marginal(axes['tic2'], y_edges, test_tics[:, 1], train_tics[:, 1], theme, horizontal=True)
     axes['tic2'].set_ylim(tic_lower[1], tic_upper[1])
     ax = axes['numbers']
     blank(ax)
     note(ax, ['tica_w2    %.2f' % metrics['tica_w2'], 'tica_k_jsd %.3f' % metrics['tica_k_jsd']],
          theme, loc='lower left', size=6.5)
-    legend(fig, dict(theme, fill=density_map(theme)(0.45)),
-           [('whole test split', 'fill', 'patch'),
-                        ('test split, %d rows' % len(test), 'test', 'line'),
-                        ('train split, %d rows' % len(train), 'train', 'line'),
+    legend(fig, theme, [('test split', 'test', 'line'), ('train split', 'train', 'line'),
                         ('k-means cell border', 'muted', 'line')])
     return fig
 

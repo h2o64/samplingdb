@@ -1,22 +1,23 @@
 # Draw the figures of the glass formers' page
 
 # Libraries
-import argparse, pprint, sys, pathlib
+import argparse, inspect, pprint, sys, pathlib
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from matplotlib.collections import EllipseCollection
 from matplotlib.colors import LinearSegmentedColormap, to_rgb, to_rgba_array
 from samplingdb import build
-from samplingdb.targets.base import generator
-from samplingdb.targets.physics import minimum_image, swap_monte_carlo
+from samplingdb.targets.base import chain_layout, generator
+from samplingdb.targets.physics import PeriodicPairMixture, minimum_image, swap_monte_carlo
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from common import blank, legend, note, save, save_gif
 
 # Parse the arguments
 parser = argparse.ArgumentParser()
-parser.add_argument('--n_train', type=int, default=512)
-parser.add_argument('--n_ref', type=int, default=4096)
+parser.add_argument('--n_train', type=int, default=None)
+parser.add_argument('--n_test', type=int, default=None)
+parser.add_argument('--chunk_size', type=int, default=4096)
 parser.add_argument('--n_chains', type=int, default=64)
 parser.add_argument('--n_time_units', type=int, default=10000)
 parser.add_argument('--n_frames', type=int, default=70)
@@ -102,7 +103,7 @@ def hexatic(target, x):
     delta = minimum_image(positions[:, None] - positions[:, :, None], target.box)
     distances = torch.linalg.norm(delta, dim=-1)
     distances = distances + torch.diag(torch.full((target.n_particles,), float('inf'),
-                                                  dtype=distances.dtype))
+                                                  dtype=distances.dtype, device=distances.device))
     nearest = distances.topk(6, dim=-1, largest=False).indices
     bonds = torch.gather(delta, 2, nearest[..., None].expand(-1, -1, -1, 2))
     angles = torch.atan2(bonds[..., 1], bonds[..., 0])
@@ -129,26 +130,36 @@ def swap_palette(theme, steps=10):
             for weight in np.linspace(0.0, 1.0, steps + 1)[1:]]
 
 
-# Build the three systems, their two splits and their panels, with the floor of each panel: the
-# first n_train reference rows scored against the next n_ref, as the train split is
+# Build the three systems, their splits, and their panels against one half of the test split
 systems = {}
 for name in SYSTEMS:
-    target = build(name)
-    test = target.test_samples(n=args.n_train + args.n_ref)
-    reference, held_out = test[args.n_train:], test[:args.n_train]
+    target = build(name).to(args.device)
+    test = target.test_samples(n=args.n_test)
     train = target.train_samples(n=args.n_train)
+    half = len(test) // 2
+    reference, held_out = test[half:], test[:half]
     metrics, hist = target.compute_metrics(train, ref_samples=reference, return_hist=True)
     floor = target.compute_metrics(held_out, ref_samples=reference)
-    systems[name] = {'target': target, 'test': held_out, 'train': train, 'metrics': metrics,
-                     'hist': hist, 'floor': floor,
-                     'energy': target.energy(train).numpy() / target.n_particles,
-                     'ref_energy': target.energy(reference).numpy() / target.n_particles}
+    energy = (target.energy(train) / target.n_particles).cpu().numpy()
+    test_energy = (target.energy(test) / target.n_particles).cpu().numpy()
+    systems[name] = {'target': target, 'test': test, 'train': train, 'metrics': metrics,
+                     'hist': hist, 'floor': floor, 'energy': energy, 'test_energy': test_energy,
+                     'ref_energy': test_energy[half:]}
+    print(name, 'train %d, test %d, panel against %d, floor from %d'
+          % (len(train), len(test), len(reference), len(held_out)))
     print(name, 'train', {key: round(value, 4) for key, value in metrics.items()})
     print(name, 'floor', {key: round(value, 4) for key, value in floor.items()})
+    print(name, 'energy per particle: train [%.4f, %.4f], test [%.4f, %.4f], %.5f of the test '
+          'inside the train range' % (energy.min(), energy.max(), test_energy.min(),
+                                      test_energy.max(), np.mean((test_energy >= energy.min())
+                                                                  & (test_energy <= energy.max()))))
 
-# The binary's test configuration: among the 16 closest to the median of the set in both the
-# crystalline fraction of A (|psi_6| > 0.8) and the coherence of A's orientation (|mean psi_6|),
-# the one whose B particles touch each other most, so the band they form is in view
+# Pick the configuration of each split closest to its median energy
+for entry in systems.values():
+    for split, values in [('test', entry['test_energy']), ('train', entry['energy'])]:
+        entry['pick_' + split] = int(np.abs(values - np.median(values)).argmin())
+
+# Pick the binary's by the crystalline order of A and the contacts of B instead
 binary = systems['ka-binary-N64-T0.2']
 target = binary['target']
 is_a, is_b = target.species == 0, target.species == 1
@@ -160,26 +171,26 @@ def order_statistics(x):
     positions = target.positions(x)
     delta = minimum_image(positions[:, None] - positions[:, :, None], target.box)
     distances = torch.linalg.norm(delta, dim=-1)
-    distances = distances + torch.diag(torch.full((target.n_particles,), float('inf')))
+    distances = distances + torch.diag(torch.full((target.n_particles,), float('inf'),
+                                                  device=distances.device))
     nearest = distances.topk(6, dim=-1, largest=False).indices
     contacts = is_b[nearest][:, is_b].float().mean(dim=(1, 2))
     return (psi.abs()[:, is_a] > 0.8).float().mean(-1), psi[:, is_a].mean(-1).abs(), contacts
 
 
-crystalline, coherence, contacts = order_statistics(binary['test'])
-distance = ((crystalline - crystalline.median()).abs() / crystalline.std()
-            + (coherence - coherence.median()).abs() / coherence.std())
-typical = distance.argsort()[:16]
-pick = int(typical[contacts[typical].argmax()])
-binary['pick'] = pick
-binary['psi_test'] = hexatic(target, binary['test'][pick:pick + 1])[0].abs().numpy()
-binary['psi_train'] = hexatic(target, binary['train'][:1])[0].abs().numpy()
-train_crystalline, train_coherence, train_contacts = order_statistics(binary['train'])
-print('binary test:  crystalline A %.3f, coherence %.3f, B-B contacts %.3f (medians); picked %d '
-      'at %.3f, %.3f, %.3f' % (crystalline.median(), coherence.median(), contacts.median(), pick,
-                               crystalline[pick], coherence[pick], contacts[pick]))
-print('binary train: crystalline A %.3f, coherence %.3f, B-B contacts %.3f (medians)'
-      % (train_crystalline.median(), train_coherence.median(), train_contacts.median()))
+for split in ['test', 'train']:
+    statistics = [order_statistics(x) for x in binary[split].split(args.chunk_size)]
+    crystalline, coherence, contacts = [torch.cat(values).cpu() for values in zip(*statistics)]
+    distance = ((crystalline - crystalline.median()).abs() / crystalline.std()
+                + (coherence - coherence.median()).abs() / coherence.std())
+    typical = distance.argsort()[:16]
+    pick = int(typical[contacts[typical].argmax()])
+    binary['pick_' + split] = pick
+    binary['psi_' + split] = hexatic(target, binary[split][pick:pick + 1])[0].abs().cpu().numpy()
+    print('binary %s: crystalline A %.3f, coherence %.3f, B-B contacts %.3f (medians over %d); '
+          'picked %d at %.3f, %.3f, %.3f' % (split, crystalline.median(), coherence.median(),
+                                             contacts.median(), len(crystalline), pick,
+                                             crystalline[pick], coherence[pick], contacts[pick]))
 
 
 def draw_configurations(theme):
@@ -195,17 +206,16 @@ def draw_configurations(theme):
     for column, (name, label) in enumerate(SYSTEMS.items()):
         entry = systems[name]
         target = entry['target']
-        index = entry.get('pick', 0)
         for row, split in enumerate(['test', 'train']):
-            x = entry[split][index if split == 'test' else 0]
-            discs(axes[row, column], target, wrap(target, x.numpy()),
-                  species_colours(target, theme), theme)
+            x = entry[split][entry['pick_' + split]].cpu().numpy()
+            discs(axes[row, column], target, wrap(target, x), species_colours(target, theme),
+                  theme)
         axes[0, column].set_title(label)
 
     # The binary's two configurations again, every particle shaded by its hexatic order
     target = binary['target']
     for row, split in enumerate(['test', 'train']):
-        x = binary[split][binary['pick'] if split == 'test' else 0].numpy()
+        x = binary[split][binary['pick_' + split]].cpu().numpy()
         colours = hexatic_map(binary['psi_' + split])
         discs(axes[row, 3], target, wrap(target, x), colours, theme)
     axes[0, 3].set_title('binary, $|\\psi_6|$')
@@ -241,9 +251,9 @@ def draw_structure(theme):
         # g(r) of both splits, and where the two differ most
         ax = axes[0, column]
         rdf = hist['rdf']
-        centres = rdf['centres'].numpy()
-        ax.plot(centres, rdf['ref_g'].numpy(), color=theme['test'], linewidth=1.2)
-        ax.plot(centres, rdf['g'].numpy(), color=theme['train'], linewidth=1.0)
+        centres = rdf['centres'].cpu().numpy()
+        ax.plot(centres, rdf['ref_g'].cpu().numpy(), color=theme['test'], linewidth=1.2)
+        ax.plot(centres, rdf['g'].cpu().numpy(), color=theme['train'], linewidth=1.0)
         worst = int((rdf['g'] - rdf['ref_g']).abs().argmax())
         ax.axvline(centres[worst], color=theme['muted'], linewidth=0.8)
         ax.set_xlim(0.5, max(target.box / 2, centres[worst] + 0.3))
@@ -262,7 +272,7 @@ def draw_structure(theme):
         heights = [ax.hist(values, bins=edges, density=True, histtype='step', color=theme[key],
                            linewidth=1.0)[0].max()
                    for values, key in [(ref_energy, 'test'), (energy, 'train')]]
-        panel_edges = hist['energy']['edges'].numpy()
+        panel_edges = hist['energy']['edges'].cpu().numpy()
         ax.axvspan(panel_edges[0], panel_edges[-1], color=theme['grid'], alpha=0.5, linewidth=0)
         ax.set_ylim(0.0, 1.75 * max(heights))
         ax.set_xlabel('energy per particle')
@@ -280,82 +290,98 @@ def draw_structure(theme):
 
 save(draw_structure, 'glasses_structure')
 
-# The train recipe's start, run at T = 0.32 under the train recipe's kernel (displacement only)
-# and under the reference generator's (swap Monte Carlo), frames at log-spaced times
-glass = build('ka-ternary-N44-T0.32').to(args.device)
-start = glass.lattice_configuration(args.n_chains, jitter=0.05, generator=generator(0))
-times = np.unique(np.round(np.logspace(0, np.log10(args.n_time_units), args.n_frames)).astype(int))
-times = np.concatenate([[0], times])
+# Run the train recipe's schedule and displacements only from the recipe's start at T = 0.32
+entry = systems['ka-ternary-N44-T0.32']
+glass = entry['target']
+defaults = inspect.signature(PeriodicPairMixture.generate_train_samples).parameters
+basin_end = defaults['basin_time_units'].default
+_, n_kept = chain_layout(len(entry['train']), defaults['n_chains'].default)
+split_end = basin_end + defaults['n_time_units'].default + n_kept * defaults['thin'].default
+start = glass.lattice_configuration(args.n_chains, jitter=0.05, offset=True, shuffle=True,
+                                    generator=generator(0, device=args.device))
+times = np.round(np.logspace(0, np.log10(args.n_time_units), args.n_frames)).astype(int)
+times = np.unique(np.concatenate([[0, basin_end, split_end], times]))
 runs = {}
-for key, p_swap in [('train', 0.0), ('test', 0.2)]:
-    gen = torch.Generator(device=args.device).manual_seed(1)
-    x = start.to(args.device)
+for key, p_swap, end in [('displacement', 0.0, args.n_time_units),
+                         ('recipe', glass.train_p_swap, split_end)]:
+    gen = generator(1, device=args.device)
+    x = start.clone()
     frames, energies = [], []
     for previous, time in zip(np.concatenate([[0], times[:-1]]), times):
+        if time > end:
+            break
         if time > previous:
-            x = swap_monte_carlo(glass, x, n_time_units=int(time - previous), p_swap=p_swap,
-                                 generator=gen, compile=args.device == 'cuda')
+            x = swap_monte_carlo(glass, x, n_time_units=int(time - previous),
+                                 p_swap=p_swap if time <= basin_end else 0.0, generator=gen,
+                                 compile=args.device == 'cuda')
             x = x.reshape(args.n_chains, glass.n_particles, 2)
         flat = x.reshape(args.n_chains, -1)
         frames.append(flat[0].cpu().numpy())
         energies.append((glass.energy(flat) / glass.n_particles).cpu().numpy())
     runs[key] = {'frames': frames, 'energy': np.stack(energies)}
-    print(key, 'final energy per particle %.4f +- %.4f' % (runs[key]['energy'][-1].mean(),
-                                                           runs[key]['energy'][-1].std()))
-glass = glass.cpu()
-band = systems['ka-ternary-N44-T0.32']['ref_energy']
-band_low, band_mid, band_high = np.quantile(band, [0.05, 0.5, 0.95])
+band_low, band_mid, band_high = np.quantile(entry['test_energy'], [0.05, 0.5, 0.95])
 print('test energy per particle: median %.4f, 90%% band [%.4f, %.4f]'
       % (band_mid, band_low, band_high))
-for key in ['train', 'test']:
-    mean = runs[key]['energy'].mean(-1)
+for key, run in runs.items():
+    mean = run['energy'].mean(-1)
     inside = np.nonzero(mean <= band_high)[0]
-    print(key, 'mean energy at t = 2000: %.4f; first time inside the band: %s'
-          % (mean[np.searchsorted(times, 2000)] if times[-1] >= 2000 else float('nan'),
-             times[inside[0]] if len(inside) else 'never'))
+    marks = [time for time in [basin_end, split_end, args.n_time_units]
+             if time <= times[len(mean) - 1]]
+    print(key, ', '.join('mean energy at t = %d: %.4f' % (time, mean[np.searchsorted(times, time)])
+                         for time in marks),
+          '; first time inside the band: %s' % (times[inside[0]] if len(inside) else 'never'))
 
 # The energy axis shows the late part of the runs, both chains entering it from the lattice above
 low = min(run['energy'].mean(-1).min() for run in runs.values())
 top = -1.0
 hold = 15
+COLOURS = {'displacement': 'ink', 'recipe': 'train'}
+LABELS = {'displacement': 'displacements only', 'recipe': 'train recipe'}
 
 
 def draw_swap_frame(theme, index):
-    """Draws one frame: the two chains' configurations, then their mean energies so far"""
+    """Draws one frame: the two runs' configurations, then their mean energies so far
+
+    NOTE: the run of displacements only is drawn in the ink colour rather than theme['sample'],
+    which is species B's colour in the boxes above it.
+    """
     theme = dict(theme, **dict(zip(['A', 'B', 'C'], SPECIES[theme['name']])))
     index = min(index, len(times) - 1)
     fig = plt.figure(figsize=(6.0, 5.1))
     grid = fig.add_gridspec(2, 2, height_ratios=[1.0, 0.62], hspace=0.12)
     colours = species_colours(glass, theme)
-    for column, (key, label) in enumerate([('train', 'displacement only (train recipe)'),
-                                           ('test', 'swap Monte Carlo (reference)')]):
+    for column, key in enumerate(runs):
         ax = fig.add_subplot(grid[0, column])
-        discs(ax, glass, wrap(glass, runs[key]['frames'][index]), colours, theme)
-        ax.set_title(label, fontsize=9)
+        frame = min(index, len(runs[key]['frames']) - 1)
+        discs(ax, glass, wrap(glass, runs[key]['frames'][frame]), colours, theme)
+        ax.set_title(LABELS[key], fontsize=9)
 
     # Mean energy per particle over the chains, against the test split's 90% band
     ax = fig.add_subplot(grid[1, :])
     ax.axhspan(band_low, band_high, color=theme['test'], alpha=0.18, linewidth=0)
-    for key, label in [('train', 'displacement only'), ('test', 'swap')]:
-        mean = runs[key]['energy'][1:index + 1].mean(-1)
-        ax.plot(times[1:index + 1], mean, color=theme[key], linewidth=1.5)
-        if index > 0 and mean[-1] < top:
-            ax.text(times[index] * 1.15, mean[-1], label, color=theme['ink'], fontsize=7.5,
-                    va='center')
-    ax.axvline(2000, color=theme['muted'], linewidth=0.8)
-    ax.text(2000, 1.02, 'train split ends', color=theme['muted'], fontsize=7.5, ha='center',
-            va='bottom', transform=ax.get_xaxis_transform())
+    for key, run in runs.items():
+        stop = min(index, len(run['frames']) - 1)
+        mean = run['energy'][1:stop + 1].mean(-1)
+        ax.plot(times[1:stop + 1], mean, color=theme[COLOURS[key]], linewidth=1.5)
+        if stop > 0 and mean[-1] < top:
+            ax.text(times[stop] * 1.15, mean[-1], LABELS[key], color=theme['ink'], fontsize=7.5,
+                    va='center', in_layout=False)
+    for time, label, align in [(basin_end, 'swaps stop', 'right'),
+                               (split_end, 'train split ends', 'left')]:
+        ax.axvline(time, color=theme['muted'], linewidth=0.8)
+        ax.text(time, 1.02, label, color=theme['muted'], fontsize=7.5, ha=align, va='bottom',
+                transform=ax.get_xaxis_transform())
     ax.set_xscale('log')
-    ax.set_xlim(1, times[-1] * 6)
+    ax.set_xlim(1, times[-1] * 10)
     ax.set_ylim(min(low, band_low) - 0.05, top)
     ax.set_xlabel('time units (one is %d attempted moves)' % glass.n_particles)
     ax.set_ylabel('energy per particle')
     ax.text(0.99, 0.95, 't = %d' % times[index], transform=ax.transAxes, ha='right', va='top',
             fontsize=9, family='DejaVu Sans Mono')
-    handles = [plt.Line2D([], [], color=theme['train'], linewidth=1.5, label='displacement only'),
-               plt.Line2D([], [], color=theme['test'], linewidth=1.5, label='swap'),
-               plt.Rectangle((0, 0), 1, 1, color=theme['test'], alpha=0.18,
-                             label='test split, 90% of it')]
+    handles = [plt.Line2D([], [], color=theme[COLOURS[key]], linewidth=1.5, label=LABELS[key])
+               for key in runs]
+    handles.append(plt.Rectangle((0, 0), 1, 1, color=theme['test'], alpha=0.18,
+                                 label='test split, 90% of it'))
     fig.legend(handles=handles, loc='outside upper center', ncol=3, handletextpad=0.4,
                columnspacing=1.6)
     return fig
