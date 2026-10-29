@@ -11,39 +11,39 @@ import torch
 GAS_CONSTANT = 0.00831446261815324
 
 # OpenMM's internal Coulomb constant, and the different literal its app-level GB expressions
-# carry. They differ in the 8th digit, so using one for both leaves a 2e-7 relative error on the
-# Coulomb sum -- of order 1e-4 kJ/mol on these systems, and the entire residual until it was found
+# carry. They differ in the 8th digit, a 2e-7 relative error on the Coulomb sum, so each force
+# uses its own
 ONE_4PI_EPS0 = 138.935456
 GB_4PI_EPS0 = 138.935485
 
 # Squared length added under every square root. At any real interatomic distance this sits far
-# below double-precision resolution, so it changes no energy this library reports; it exists so a
-# coincident pair gives a huge finite number instead of a nan gradient.
+# below double-precision resolution, so it changes no energy this library reports; it makes a
+# coincident pair give a huge finite number instead of a nan gradient
 MIN_SQUARE = 1e-24
 
 # Dielectric offset and probe radius of the OBC models, in nm
 OBC_OFFSET = 0.009
 OBC_PROBE = 0.14
 
-# Live (chunk, n_atoms, n_atoms) matrices one chunk holds for an energy AND gradient pass, counted
-# in elements rather than bytes: the COUNT is dtype-independent and only the width changes, so
-# float32 fits twice the chunk. Assuming 8 bytes here silently halved the chunk in single precision.
-# The count bounds the memory of a large batch. torch.compile is the dominant variable, not
-# the system: inductor fuses the elementwise chain and holds ~8x fewer, and only once compiled
-# does the nonbonded branch separate, a NoCutoff system keeping about twice what a cutoff one does
-# because none of its pair terms are masked away. Measured unchunked at batch 1024 on the four
-# peptides and a ten-residue one -- 28.3-30.1 eager, 7.1-7.2 compiled without a cutoff, 3.3-3.5
-# compiled with one -- and rounded up. Only an UNCHUNKED call measures this, since dividing a
-# chunked call's peak by its batch measures the chunk size instead
+# Live (chunk, n_atoms, n_atoms) matrices one chunk holds for an energy and gradient pass, counted
+# in elements so that the byte count follows the dtype. Compiling holds ~8x fewer, and a compiled
+# NoCutoff system keeps about twice what a cutoff one does, because none of its pair terms are
+# masked away. Peak memory of an unchunked batch of 1024 on the four peptides, rounded up
 MATRICES_EAGER = 31.0
 MATRICES_COMPILED_NO_CUTOFF = 7.5
 MATRICES_COMPILED_CUTOFF = 3.6
 
-# Working memory one chunk may hold, which is what keeps a 10^5-frame reference set from
-# allocating the whole GPU. There is no throughput reason to go higher: cost per configuration is
-# flat from batch 512 to 8192 on both branches, Ace-A-Nme at 2.71 / 2.00 / 1.89 us for 512 / 2048 /
-# 8192, so past ~2048 a larger chunk buys memory pressure and nothing else
+# Working memory one chunk may hold, in bytes, so that a 10^5-frame reference set does not
+# allocate the whole GPU. The cost per configuration is flat past a batch of ~2048, so a larger
+# chunk only adds memory pressure
 MEMORY_BUDGET = 3 * 1024 ** 3
+
+# Graphs torch.compile may cache for the potential. Every force field compiles the same code
+# object, and each adds up to four graphs per dtype and device -- with and without a gradient, for
+# the first batch shape and then a dynamic one -- so torch's default of 8 would leave a later
+# peptide of the same process uncompiled. The limit is process-wide state, so it is raised around
+# this module's own calls only
+RECOMPILE_LIMIT = 64
 
 # The forces this module knows how to evaluate. CMMotionRemover carries no potential energy.
 KNOWN_FORCES = ['HarmonicBondForce', 'HarmonicAngleForce', 'PeriodicTorsionForce',
@@ -175,8 +175,7 @@ def extract_parameters(system):
             parameters['epsilon'] = np.array([r[2]._value for r in rows])
             rows = [force.getExceptionParameters(i) for i in range(force.getNumExceptions())]
             # The dtype and the shape are explicit because np.array([]) is a float64 of shape (0,),
-            # which would register exception_index as a float buffer and then fail as a tensor
-            # index. Unreachable for any molecule with bonds, but it costs nothing to be right
+            # which would register exception_index as a float buffer and fail as a tensor index
             parameters['exception_index'] = np.array([[r[0], r[1]] for r in rows],
                                                      dtype=np.int64).reshape(-1, 2)
             parameters['exception_charge'] = np.array([r[2]._value for r in rows])
@@ -228,57 +227,32 @@ class TorchForceField(torch.nn.Module):
 
     Positions are in nanometres and energies in kT, the conventions of every reference
     implementation in this corpus (transferable-samplers' OpenMMEnergy, bgflow's OpenMMBridge).
+    The whole batch is evaluated as one set of tensor operations.
 
-    This replaces the per-configuration OpenMM Context the library used to evaluate through. An
-    OpenMM Context holds ONE configuration, so a batch cost a Python loop and no two energies were
-    ever computed at the same time; here the whole batch is one set of tensor operations. Measured
-    on this machine, energy and forces together, in float64 (gen/openmm_check/compare.py):
+    Every parameter is read out of the openmm.System, never re-derived, so OpenMM remains the
+    authority on force-field files, atom typing and topology, and only the summation is
+    reimplemented. In float64 it agrees with OpenMM's Reference platform to ~2e-6 kT on the energy
+    and ~1e-5 kJ/mol/nm on forces of order 4e3. tests/test_molecular.py asserts that agreement per
+    system, energies to 1e-5 kT and forces to 1e-4 kT/nm, and gen/openmm_check/compare.py checks
+    float64 forces against the Reference platform to 1e-4 of their rms, force group by force group.
 
-    | system     | atoms | OpenMM Reference | OpenMM CUDA | 32-process CPU pool | this, compiled |
-    | ---        | ---   | ---              | ---         | ---                 | ---            |
-    | Ace-A-Nme  |  22   | 18 900 /s        | 3 000 /s    | 30 500 /s           | 473 000 /s     |
+    NOTE: compare against OpenMM's Reference platform only. CUDA and OpenCL need Precision=double,
+    the CPU platform evaluates its nonbonded and GB terms in single precision whatever it is asked
+    for, and Reference is the only deterministic one.
 
-    NOTE: the score is where this loses ground per configuration. OpenMM's forces are essentially
-    free -- hand-written in the kernel for the standard forces, and symbolically differentiated by
-    Lepton at Context creation for the CustomGBForce -- so asking for them on top of the energy
-    costs it 1.0x to 1.3x. Autograd costs 2.2x to 3.5x. Batching wins by so much more than that
-    factor that the comparison above already includes forces on both sides.
+    NOTE: OpenMM's built-in GBSAOBCForce carries Ponder's inside-atom correction and the Amber
+    app's CustomGBForce does not; born_radii follows each force it is read from.
 
-    WARNING: every parameter is read out of the openmm.System, never re-derived, so OpenMM remains
-    the authority on force-field files, atom typing and topology. What is reimplemented is the
-    summation, not the force field. In float64 it agrees with OpenMM's Reference platform to
-    ~2e-6 kT on the energy and ~1e-5 kJ/mol/nm on forces of order 4e3, about 1e-8 of their rms,
-    measured on 64 released and 64 reference frames of each of the four peptides.
-    tests/test_molecular.py asserts that agreement per system, energies to 1e-5 kT and forces to
-    1e-4 kT/nm, and gen/openmm_check/compare.py checks float64 forces against the Reference
-    platform to 1e-4 of their rms, force group by force group.
+    NOTE: at a near-collinear angle this module departs from OpenMM. OpenMM's HarmonicAngleForce
+    clamps its cosine off +-1, so its angle force drops ~31% at pi - theta ~ 1e-6; the atan2 form
+    here stays continuous. The two agree to 1e-4 kJ/mol/nm at pi - theta >= 1e-4, which is every
+    geometry short of a clash.
 
-    NOTE: the only platform that ground-truth means anything against is Reference. CUDA and OpenCL
-    need Precision=double, and the CPU platform evaluates its nonbonded and GB terms in single
-    precision INTERNALLY whatever it is asked for, so it is not a double-precision reference no
-    matter how it is configured. Reference is also the only deterministic one.
-
-    NOTE: an earlier version of this note said that below ~0.02 nm OpenMM's built-in
-    GBSAOBCForce and its own CustomGBForce rendering of OBC2 disagree because they group the Born
-    integral differently, and that this module followed the CustomGBForce. The disagreement was
-    real and the explanation was wrong: the two are different models, the built-in one carrying
-    Ponder's inside-atom correction. born_radii now follows each force it is read from; see its
-    docstring.
-
-    NOTE: at a near-collinear angle this module deliberately does NOT match OpenMM, and is the
-    more physical of the two. OpenMM's HarmonicAngleForce clamps its cosine off +-1 exactly as an
-    earlier version of bonded() did, so its angle force drops ~31% at pi - theta ~ 1e-6 where the
-    clamp bites; the atan2 form here stays continuous through it. Both agree to 1e-4 kJ/mol/nm at
-    pi - theta >= 1e-4, which is every geometry short of a clash.
-
-    NOTE: unlike every other target in this library the score here is autograd rather than
-    hand-written algebra. It is still exact: the energy is a closed-form expression and its
-    derivative is machine-precision, not a finite difference. Hand-written first derivatives were
-    the wrong trade because the score has to be ABLE to stay differentiable -- a loss may
-    differentiate through it -- and that would mean hand-writing the second derivatives too.
-
-    NOTE: being able to is not the same as always doing it. Retaining the backward graph is only
-    paid for when differentiable_score is set, which is off by default; see evaluate().
+    NOTE: the score is autograd through the closed-form energy, exact to machine precision, and
+    costs 2x to 3.5x the energy alone. It is the one score in the library not written out by hand,
+    because it has to be able to stay differentiable for a loss built on it, and hand-written first
+    derivatives would need hand-written second ones. The backward graph is retained only when
+    differentiable_score is set, which is off by default; see evaluate().
     """
 
     def __init__(self, system, temperature, energy_cut=1e8, energy_max=1e20, chunk_size=None,
@@ -309,40 +283,11 @@ class TorchForceField(torch.nn.Module):
             * dtype (torch.dtype): Working dtype, which the input is CAST to rather than promoted
                 from (default is torch.float32)
 
-                This default was float64 until 2026-08-25, on the strength of a measurement that
-                float32 carried an error of 0.15 to 0.8 kT -- enough to move an importance weight by
-                a factor of two. **That measurement was an artefact of a formulation this class no
-                longer uses.** It was taken when the nonbonded sum kept every pair and subtracted
-                the excluded ones back out; a bonded pair sits well inside sigma, so its
-                (sigma/r)^12 is enormous and adding it in destroys the mantissa of every physical
-                term before the subtraction can undo it. float64 has the digits to survive that,
-                float32 does not. Exceptions are now dropped from the pair list instead (point 4 of
-                the constructor), and the measurement had not been repeated since.
-
-                Measured against float64 on 2048 released test frames: max |dE| is 1.2e-04 kT on
-                Ace-A-Nme and 3.8e-04 kT on AAAAAA, term by term worst in the Born radius at
-                1.0e-04 and 2.2e-04, and the force is off by 1.7e-05 to 3.9e-05 of its own rms.
-                For scale, the 1 fs timestep's own bias is 0.08 kT -- some 250x larger -- so
-                discretisation dominates precision by orders of magnitude. It buys 2.2x on
-                Ace-A-Nme and 7.7x on AAAAAA, and halves the memory, which
-                doubles the chunk this class derives for itself.
-
-                The ENSEMBLE is unchanged too, which is the claim that matters for a reference
-                set: these are generated by an unadjusted integrator, where a force error biases the
-                stationary law directly with no accept/reject to correct it. Measured on AAAAAA with
-                FIVE independent float64 runs and three float32 ones, judged throughout by a float64
-                energy: on the energy and all four cosine torsions, the median float32-against-
-                float64 Wasserstein distance is LOWER than the median float64-against-float64 one.
-                float32 agrees with float64 better than float64 agrees with itself.
-
-                A single pair is not a floor. An earlier version of that test used one float64 pair
-                and a torsion came out 4.1x above it, which reads as a bias; across pairs that same
-                comparison ranges over a factor of ten.
-
-                Use float64 when comparing against OpenMM, which resolves ~1e-6 kT and which
-                float32 cannot reach, or when a number looks wrong and precision should be off the
-                list of suspects. The validation chain is float64-against-OpenMM at ~2e-6 kT, then
-                float32-against-float64 at a few 1e-4 kT.
+                float32 agrees with float64 to a few 1e-4 kT on the energy and to ~4e-5 of the rms
+                on the force, far below the bias of a 1 fs integrator step, runs 2x to 8x faster
+                and halves the memory, which doubles the chunk this class derives for itself. Use
+                float64 to compare against OpenMM, which resolves ~1e-6 kT, or to rule precision
+                out when a number looks wrong.
         """
         # Call the parent constructor
         super().__init__()
@@ -377,18 +322,11 @@ class TorchForceField(torch.nn.Module):
                 self.register_buffer(key, tensor if tensor.dtype == torch.int64
                                      else tensor.to(dtype))
 
-        # 4. The upper-triangular pair list, whose exceptions are EXCLUDED rather than subtracted
-        # back. An exception replaces the standard pair value, so summing the full triangle and
-        # adding (replacement - standard) is algebraically identical and numerically fatal. The
-        # standard Lennard-Jones term of a pair about to be replaced is no part of the true energy
-        # and grows without bound: a 1-2 pair at 1e-2 nm already carries ~1e18 kJ/mol, where
-        # float64 resolution is ~1e2 -- coarser than the whole physical nonbonded sum it is being
-        # added to. That sum is then quantised away, the subtraction returns exactly zero, and the
-        # nonbonded pair energy silently vanishes: measured against Reference on a 1-2 pair walked
-        # from 1e-2 to 1e-5 nm, the error was 125 to 650 kJ/mol and sometimes DOWNWARD, which is a
-        # spurious low-energy region rather than an honest inf. OpenMM builds an exclusion list for
-        # the same reason. Only clashes show it, which is why it survived a validation restricted
-        # to released frames -- the two formulas agree to 1e-6 kJ/mol on every one of those
+        # 4. The upper-triangular pair list, with the exceptions excluded. Summing the whole
+        # triangle and adding (replacement - standard) is algebraically the same, but the standard
+        # Lennard-Jones term of a bonded pair is no part of the energy, grows without bound at short
+        # range and rounds the physical sum away. OpenMM builds an exclusion list for the same
+        # reason
         rows, cols = torch.triu_indices(self.n_atoms, self.n_atoms, offset=1)
         i, j = self.exception_index[:, 0], self.exception_index[:, 1]
         excluded = torch.minimum(i, j) * self.n_atoms + torch.maximum(i, j)
@@ -443,26 +381,19 @@ class TorchForceField(torch.nn.Module):
     def harmonic(self, positions):
         """Evaluates the harmonic bond and angle terms alone, in kJ/mol
 
-        These are the STIFF internal coordinates, and they are separated because they dominate the
-        potential energy's spread while contributing none of its conformational barriers. Each
-        quadratic degree of freedom contributes 1/2 kT^2 to the variance, so the stiff block alone
-        would give sd(E) = sqrt((n_bonds + n_angles) / 2) -- which is within a few percent of the
-        measured total on every peptide here, 5.34 against 5.40 on Ace-A-Nme and 7.52 against 8.17
-        on Ace-AAA-Nme. Dropping it from the swap statistic takes sd down by 1.55x to 1.70x, and
-        since the communication barrier density is sd / sqrt(pi) that is the ladder halving.
-        Leaving these at full strength is what replica exchange with solute tempering does for the
-        solvent (Wang, Friesner and Berne 2011) and what gREST does term by term (Kamiya and
-        Sugita 2018).
+        These are the stiff internal coordinates, which carry most of the potential energy's spread
+        and none of its conformational barriers. Each quadratic degree of freedom adds kT^2 / 2 to
+        the variance, so sd(E) is close to sqrt((n_bonds + n_angles) / 2) on every peptide here.
+        A replica exchange that leaves them at full strength and tempers the rest needs about half
+        the levels. Solute tempering leaves the solvent at full strength in the same way (Wang,
+        Friesner and Berne 2011), and gREST does it term by term (Kamiya and Sugita 2018).
         """
         # Bonds
         r = norm(positions[:, self.bond_index[:, 0]] - positions[:, self.bond_index[:, 1]])
         energy = (0.5 * self.bond_k * (r - self.bond_length) ** 2).sum(-1)
 
-        # Angles, from the cross product rather than from acos of a cosine clamped off +-1. The
-        # clamp saturates at pi - theta ~ 1.4e-6, and there it freezes theta and takes ~31% of the
-        # angle force with it, discontinuously: measured on one Ace-A-Nme angle, |F| runs
-        # 8402 -> 8424.5 -> 8424.7 through atan2 as pi - theta goes 1e-2 -> 1e-4 -> 1e-6, and
-        # 8402 -> 8424.5 -> 5806 through the clamp. atan2 needs no clamp and stays continuous
+        # Angles, through atan2 of the cross and dot products, which stays continuous at a
+        # collinear angle where acos of a clamped cosine does not
         v1 = positions[:, self.angle_index[:, 0]] - positions[:, self.angle_index[:, 1]]
         v2 = positions[:, self.angle_index[:, 2]] - positions[:, self.angle_index[:, 1]]
         theta = torch.atan2(norm(torch.cross(v1, v2, dim=-1)), (v1 * v2).sum(-1))
@@ -494,21 +425,11 @@ class TorchForceField(torch.nn.Module):
         Returns:
             * energy (torch.Tensor of shape (n, n_pairs)): The pair energies
         """
-        # The cap has to sit on the BASE, and it has to come from the GRADIENT rather than the
-        # energy. In float32 (sigma/r)^12 leaves the representable range around r = 4e-4 nm, and a
-        # coincident pair then gives an inf energy and a NaN gradient where float64 stays finite.
-        # Two things are easy to get wrong here, both measured:
-        #
-        # * Clamping the sixth power does NOT fix it. By then it has already overflowed to inf, and
-        #   clamp passes zero gradient above its ceiling, so the backward is 0 * inf = NaN.
-        # * A bound from base^12 keeps the ENERGY finite and still lets the gradient overflow,
-        #   because d/dr of base^12 carries a further 12/r = 12 base / sigma. At r = 4e-4 nm the
-        #   energy is 6.3e34 and the gradient 1.1e39, past float32's 3.4e38.
-        #
-        # base^13 is therefore what sets it. The bound is 230 in float32 and 1.3e23 in float64, so
-        # it never binds in double precision -- MIN_SQUARE floors r at 1e-12 nm, where sigma/r
-        # reaches only ~3e11 -- and it never binds on a real conformation either, where the closest
-        # approach of ~0.05 nm puts sigma/r near 7.
+        # Cap the base itself, at the 13th root of the dtype's maximum, so that a coincident pair
+        # in float32 keeps a finite gradient: d/dr of base^12 carries a further 12 base / sigma,
+        # and a cap applied after a power has overflowed passes a NaN gradient. The cap is 230 in
+        # float32 and never binds in float64 or on a real conformation, where sigma / r stays
+        # near 7 or below
         base = (sigma / r).clamp(max=0.25 * torch.finfo(r.dtype).max ** (1.0 / 13.0))
         ratio = base ** 6
         lennard_jones = 4 * epsilon * ratio * (ratio - 1)
@@ -523,9 +444,8 @@ class TorchForceField(torch.nn.Module):
         energy = self.pair_energy(r, self.pair_charge, self.pair_sigma, self.pair_epsilon,
                                   True).sum(-1)
 
-        # An exception REPLACES the standard pair value, which is already absent from pair_rows,
-        # and carries no reaction field. See point 4 of the constructor for why it is not
-        # subtracted back
+        # The exceptions, which replace the standard pair value already absent from pair_rows and
+        # carry no reaction field
         i, j = self.exception_index[:, 0], self.exception_index[:, 1]
         r = norm(positions[:, i] - positions[:, j])
         replacement = self.pair_energy(r, self.exception_charge, self.exception_sigma,
@@ -543,13 +463,10 @@ class TorchForceField(torch.nn.Module):
         follows the force it is read from: obc2 comes only from OpenMM's built-in GBSAOBCForce,
         whose Reference kernel adds the term (ReferenceObc.cpp, computeBornRadii, OpenMM 8.5.2),
         and obc1 only from the Amber app's CustomGBForce, whose expression in
-        openmm/app/internal/customgbforces.py omits it. Without it, Ace-A-Nme and Ace-AAA-Nme read
-        0.6 / 6.5 / 12.7 kJ/mol and 0.9 / 8.2 / 14.3 kJ/mol BELOW Reference at 0.95 / 0.5 / 0.01 of
-        the window, which is 0.0243 nm on both -- a clash made more attractive than it is. Nothing
-        real changes: the closest approach in 20 000 released test frames of either system is
-        0.089 nm, so the step fires on no pair of any reference set. The term is bounded by
-        1 / or_i, since it fires only where L_ij = sr_j - r_ij > or_i, so it is safe in float32.
-        This is the correction transferable-samplers' torch force field made in 16bf773.
+        openmm/app/internal/customgbforces.py omits it. The term fires only inside a clash, closer
+        than any pair of the reference sets. Since it fires only where L_ij = sr_j - r_ij > or_i,
+        it is bounded by 1 / or_i and safe in float32. transferable-samplers' torch force field
+        applies the same correction (commit 16bf773).
 
         Args:
             * r (torch.Tensor of shape (n, n_atoms, n_atoms)): Interatomic distances, whose
@@ -624,7 +541,8 @@ class TorchForceField(torch.nn.Module):
         """
         positions = x.reshape(len(x), self.n_atoms, 3).to(self.dtype)
         potential = self.compiled if self.compiled is not None else self.potential
-        return torch.cat([potential(chunk) for chunk in positions.split(self.chunk_size)])
+        with torch._dynamo.config.patch(recompile_limit=RECOMPILE_LIMIT):
+            return torch.cat([potential(chunk) for chunk in positions.split(self.chunk_size)])
 
     def evaluate(self, x):
         """Evaluates the energy and the force of every configuration in a batch
@@ -640,14 +558,12 @@ class TorchForceField(torch.nn.Module):
           time. Only a loss built on the score needs this.
 
         WARNING: the eager potential is substituted whenever the graph has to survive the call,
-        whatever compile was set to, which is both of the differentiable cases above. torch.compile
-        cannot do double backward at all, and its backward donates its own buffers, so asking it
-        for a retained graph raises 'compiled with non-empty donated buffers'. That is not
-        reproducible on a single batch shape: the first shape compiles a static kernel that has no
-        donated buffers, and only once a second shape makes torch go dynamic does it fail. Setting
-        torch._functorch.config.donated_buffer = False buys the compiled path back on a
-        differentiable energy, but it is process-wide state that would also reach the caller's own
-        model, so it is theirs to set and not ours.
+        whatever compile was set to, which is both of the differentiable cases above.
+        torch.compile cannot do double backward, and its backward donates its own buffers, so a
+        retained graph raises 'compiled with non-empty donated buffers' once a second batch shape
+        makes the kernel dynamic. Setting torch._functorch.config.donated_buffer = False restores
+        the compiled path for a differentiable energy, but it is process-wide state that also
+        reaches the caller's own model, so it is left to the caller.
 
         Args:
             * x (torch.Tensor of shape (n, n_atoms * 3)): Positions, in nanometres
@@ -663,7 +579,7 @@ class TorchForceField(torch.nn.Module):
 
         energies, forces = [], []
         for chunk in positions.split(self.chunk_size):
-            with torch.enable_grad():
+            with torch.enable_grad(), torch._dynamo.config.patch(recompile_limit=RECOMPILE_LIMIT):
                 inputs = chunk if differentiable else chunk.detach().requires_grad_(True)
                 energy = potential(inputs)
                 (gradient,) = torch.autograd.grad(energy.sum(), inputs, create_graph=create_graph,
