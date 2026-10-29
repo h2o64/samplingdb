@@ -583,23 +583,52 @@ def test_the_released_ensemble_is_stationary_under_its_own_integrator():
     assert drift < 1.0
 
 
+# A shortened train recipe, for the tests that need a biased set rather than the recipe's own
+# settings: 32 trajectories, 100 descent steps, 0.5 ps restrained, 0.5 ps released, one frame
+# every 10 fs
+SHORT_RECIPE = {'n_chains': 32, 'descent_steps': 100, 'restrain_steps': 500, 'n_steps': 500,
+                'thin': 10}
+
+
 @needs_openmm
-def test_the_md_train_split_is_non_equilibrium_but_physical():
-    """100 ps at 300 K gets the basin POPULATIONS wrong, not the coverage"""
+def test_set_torsions_rotates_rigidly_to_the_given_angles():
+    """Every torsion lands on its target and no bond length moves"""
+    if not has_pdb('AAAAAA'):
+        pytest.skip('the released PDB is not cached')
+    target = peptide('AAAAAA')
+    x = target.minimised_positions()[None].repeat(4, 1)
+    columns = list(range(target.n_phi + target.n_psi))
+    angles = 3.0 * (2 * torch.rand(4, len(columns), generator=generator(0),
+                                   dtype=torch.float64) - 1)
+    y = target.set_torsions(x, columns, angles)
+    assert torch.allclose(target.torsions(y)[:, columns], angles, atol=1e-9)
+    bonds = torch.tensor([[bond[0].index, bond[1].index] for bond in target.topology.bonds()])
+    length = lambda z: torch.linalg.norm(target.positions(z)[:, bonds[:, 0]]
+                                         - target.positions(z)[:, bonds[:, 1]], dim=-1)
+    assert torch.allclose(length(y), length(x), atol=1e-12)
+
+
+@needs_openmm
+def test_the_md_train_split_places_every_residue_in_a_basin():
+    """Once held, every residue sits at a basin centre, alpha-L the most often, chirality kept"""
     if not has_pdb('Ace-A-Nme'):
         pytest.skip('the released PDB is not cached')
     target = peptide('Ace-A-Nme')
-    train = target.train_samples(n=200)
-    assert train.shape == (200, target.dim)
-    assert torch.equal(train, target.train_samples(n=200))
+    held = target.generate_train_samples(200, n_chains=200, descent_steps=100, restrain_steps=500,
+                                         n_steps=0, thin=1)
+    angles = target.torsions(held)[:, target.ramachandran_pairs[0]]
+    centres = torch.deg2rad(torch.tensor(target.train_basins, dtype=torch.float64))
+    gaps = torch.remainder(angles[:, None] - centres + math.pi, 2 * math.pi) - math.pi
+    gap, basin = torch.linalg.norm(gaps, dim=-1).min(-1)
+    assert float(gap.max()) < math.radians(40)
+    assert float((basin == 2).double().mean()) > 0.55
+    start = target.chirality_signs(target.minimised_positions()[None])
+    assert (target.chirality_signs(held) == start).all()
 
-    # Centred, physical, and visibly one trajectory rather than an i.i.d. sample
-    assert torch.allclose(target.positions(train).mean(1), torch.zeros(200, 3, dtype=train.dtype),
-                          atol=1e-6)
-    assert torch.isfinite(target.energy(train)).all()
-    step = (train[1:] - train[:-1]).pow(2).mean()
-    spread = (train - train.mean(0)).pow(2).mean()
-    assert float(step) < float(spread)
+    # A split continues from given frames without being placed again
+    more = target.generate_train_samples(200, x0=held, n_chains=200, restrain_steps=0, n_steps=0,
+                                         thin=1)
+    assert float((more - held).abs().max()) < 0.01
 
 
 @needs_openmm
@@ -609,7 +638,7 @@ def test_the_torsion_panel_separates_the_train_split_from_the_reference():
         pytest.skip('the released trajectory is not cached')
     target = peptide('Ace-A-Nme')
     reference = reference_ensemble(target, n=8000)
-    train = target.train_samples(n=200)
+    train = target.generate_train_samples(320, **SHORT_RECIPE)
 
     floor = target.compute_metrics(reference[:4000], ref_samples=reference[4000:],
                                    compute_standard_metrics=False)
@@ -727,7 +756,7 @@ def test_the_upstream_panel_separates_the_train_split_from_the_reference():
         pytest.skip('the released trajectory is not cached')
     target = peptide('Ace-A-Nme')
     reference = reference_ensemble(target, n=4000)
-    train = target.train_samples(n=2000)
+    train = target.generate_train_samples(2000, **SHORT_RECIPE)
 
     names = ('energy_w1', 'energy_w2', 'torus_w2', 'tica_w2', 'tica_k_jsd', 'torus_k_jsd')
     floor = target.compute_upstream_metrics(reference[:2000], reference[2000:])

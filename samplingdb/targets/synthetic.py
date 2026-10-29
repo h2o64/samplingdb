@@ -5,10 +5,10 @@ import math
 import numpy as np
 import torch
 from scipy.integrate import quad
-from .kernels import random_walk_mh
+from .kernels import mala, random_walk_mh
 from ..metrics.weights import normalize_weights
 from ..metrics.histogram import histogram_tvd, weighted_histogram
-from .base import ExactTarget, generator
+from .base import ExactTarget, cycle, generator
 from .modes import ModeCoverage
 
 # Half of log(2 pi), the constant every Gaussian log-density below carries
@@ -27,6 +27,7 @@ class Funnel(ExactTarget):
     """
 
     truth_tier = 0
+    train_recipe = 'uniform-neck'
 
     def __init__(self, dim=10, scale=3.0, prior_scale=3.0, dtype=torch.float64):
         """Builds the funnel
@@ -60,9 +61,8 @@ class Funnel(ExactTarget):
     def score(self, x):
         """Evaluates the score of the funnel at x, analytically
 
-        NOTE: the x_1 derivative has three terms -- the prior, the log_sigma Jacobian of the
-        d - 1 conditionals, and their quadratic -- which is exactly what makes this one easy to
-        get wrong by hand.
+        NOTE: the x_1 derivative has three terms: the prior, the log_sigma Jacobian of the d - 1
+        conditionals, and their quadratic.
         """
         x1, rest = x[:, 0], x[:, 1:]
         precision = torch.exp(-x1)
@@ -88,23 +88,35 @@ class Funnel(ExactTarget):
                                                  dtype=self.dtype)
         return torch.cat([x1, rest], dim=-1).reshape(*sample_shape, self.dim).to(self.device)
 
-    def generate_train_samples(self, n):
-        """Runs the short-chain-from-the-origin recipe
+    def generate_train_samples(self, n, seed=0, x0=None, n_steps=200, step_size=0.5):
+        """Runs the uniform-neck recipe: the whole funnel, with x_1 uniform instead of Gaussian
 
-        Every chain starts at the origin and takes 200 Metropolis steps of size 0.5, too few to
-        traverse the neck, so the local Gaussian shape near x_1 = 0 is right and the
-        wide-variance tail at x_1 << 0 is undersampled -- the unimodal-but-pathological case of
-        the general recipe.
+        Every chain starts with x_1 uniform on [-4 scale, 4 scale] and the other coordinates drawn
+        from their exact conditional N(0, exp(x_1)), then takes n_steps random-walk Metropolis
+        steps of size step_size. The steps move the chains in the wide end and hardly at all in
+        the neck, so x_1 stays close to uniform: neck and wide end are both covered, and the
+        marginal of x_1 is far wider than N(0, scale^2).
 
         Args:
             * n (int): Number of samples, one per chain
+            * seed (int): Seed of the recipe (default is 0)
+            * x0 (torch.Tensor of shape (m, dim) or None): Starting points, chain i starting from
+                x0[i % m]; None draws them as above (default is None)
+            * n_steps (int): Random-walk steps per chain (default is 200)
+            * step_size (float): Proposal scale (default is 0.5)
 
         Returns:
             * x (torch.Tensor of shape (n, dim)): The biased samples
         """
-        gen = generator(0)
-        x0 = torch.zeros(n, self.dim, dtype=self.dtype)
-        return random_walk_mh(self.log_prob, x0, n_steps=200, step_size=0.5, generator=gen)
+        gen = generator(seed, device=self.device)
+        if x0 is None:
+            u = torch.rand(n, 1, generator=gen, dtype=self.dtype, device=self.device)
+            x1 = 4 * self.scale * (2 * u - 1)
+            rest = torch.exp(0.5 * x1) * torch.randn(n, self.dim - 1, generator=gen,
+                                                     dtype=self.dtype, device=self.device)
+            x0 = torch.cat([x1, rest], dim=-1)
+        return random_walk_mh(self.log_prob, cycle(self.cast(x0), n), n_steps, step_size,
+                              generator=gen)
 
     def x1_cdf(self, x1):
         """Evaluates the exact CDF of the dominant coordinate, N(0, scale^2)"""
@@ -133,6 +145,10 @@ class Funnel(ExactTarget):
         distance and a histogram TVD against that analytic law -- no reference draw, no
         Monte-Carlo noise on the reference side. The sliced KS over ALL coordinates, which is what
         says anything about the neck the other d - 1 live in, is 'ks' in the universal panel.
+
+        WARNING: neck_var_rel_err, the relative error on E[exp(x_1)], has a large and skewed floor:
+        exp(x_1) is log-normal with a heavy right tail, so a few draws at large x_1 carry the mean.
+        Read it against exact draws of the same size, never against 0.
 
         Args are Target.compute_metrics', plus:
             * n_bins (int): Number of bins of the histogram comparison (default is 200)
@@ -201,7 +217,7 @@ class ManyWell(ModeCoverage, ExactTarget):
     """
 
     truth_tier = 0
-    deep_well_bounds = (1.7, 1.8)
+    train_recipe = 'uniform-sides'
 
     def __init__(self, dim=32, a=-0.5, b=-6.0, c=1.0, bound=4.0, n_grid=200001, prior_scale=2.0,
                  dtype=torch.float64):
@@ -234,6 +250,11 @@ class ManyWell(ModeCoverage, ExactTarget):
         self.log_Z_2d = log_Z_1d + HALF_LOG_2PI
         self.prior_scale = prior_scale
         self.register_buffer('mode_weights', torch.as_tensor(well_mass, dtype=dtype))
+
+        # The left and right minima of the 1D quartic, the real roots of its derivative either
+        # side of the barrier, where the train chains start
+        roots = np.sort(np.roots([4 * c, 0.0, 2 * b, a]).real)
+        self.well_minima = (float(roots[0]), float(roots[-1]))
 
         # 3. The inverse-CDF grid of the 1D marginal
         grid, cdf, moments = _double_well_grid(a, b, c, bound, n_grid)
@@ -287,24 +308,54 @@ class ManyWell(ModeCoverage, ExactTarget):
         x[:, 1::2] = torch.randn(n, self.n_wells, generator=generator, dtype=self.dtype)
         return x.reshape(*sample_shape, self.dim).to(self.device)
 
-    def generate_train_samples(self, n):
-        """Runs the one-well-combination random-walk recipe
+    def train_modes(self, n, generator=None):
+        """Draws the side of every well for every train chain, left with a per-chain probability
 
-        Every chain starts at (x1, x2) = (1.75, 0) in every well -- the deep well of each -- and
-        takes 200 Metropolis steps of size 0.3, below the quartic barrier height, so no
-        coordinate pair ever flips sign. Exactly one of the 2^(d/2) modes is visited, with the
-        correct local curvature.
+        Each chain draws p uniformly on [0, 1] and then puts each of its wells on the left side
+        with probability p, independently. Every well is on its light side half the time, and the
+        number of left wells is uniform over 0..n_wells rather than binomial, which spreads the
+        energy into both tails.
+
+        Args:
+            * n (int): Number of chains
+            * generator (torch.Generator or None): RNG, on the target's device (default is None)
+
+        Returns:
+            * left (torch.Tensor of shape (n, n_wells)): Whether each well starts on the left
+        """
+        p = torch.rand(n, 1, generator=generator, dtype=self.dtype, device=self.device)
+        u = torch.rand(n, self.n_wells, generator=generator, dtype=self.dtype, device=self.device)
+        return u < p
+
+    def generate_train_samples(self, n, seed=0, x0=None, n_steps=200, step_size=0.02):
+        """Runs the uniform-sides recipe: both sides of every well, in the wrong proportions
+
+        Every chain draws its wells' sides from train_modes, starts each quartic coordinate at the
+        minimum of its side (well_minima) and each Gaussian coordinate at an exact N(0, 1) draw,
+        then takes n_steps MALA steps of size step_size, which relax every coordinate inside its
+        well without crossing the barrier. Both sides of every well are visited, in the wrong
+        proportions.
 
         Args:
             * n (int): Number of samples, one per chain
+            * seed (int): Seed of the recipe (default is 0)
+            * x0 (torch.Tensor of shape (m, dim) or None): Starting points, chain i starting from
+                x0[i % m]; None draws them as above (default is None)
+            * n_steps (int): MALA steps per chain (default is 200)
+            * step_size (float): MALA step size (default is 0.02)
 
         Returns:
             * x (torch.Tensor of shape (n, dim)): The biased samples
         """
-        gen = generator(0)
-        x0 = torch.zeros(n, self.dim, dtype=self.dtype)
-        x0[:, 0::2] = 0.5 * (self.deep_well_bounds[0] + self.deep_well_bounds[1])
-        return random_walk_mh(self.log_prob, x0, n_steps=200, step_size=0.3, generator=gen)
+        gen = generator(seed, device=self.device)
+        if x0 is None:
+            left = self.train_modes(n, generator=gen)
+            x0 = torch.empty(n, self.dim, dtype=self.dtype, device=self.device)
+            x0[:, 0::2] = torch.where(left, self.well_minima[0], self.well_minima[1])
+            x0[:, 1::2] = torch.randn(n, self.n_wells, generator=gen, dtype=self.dtype,
+                                      device=self.device)
+        return mala(self.log_prob, self.score, cycle(self.cast(x0), n), n_steps, step_size,
+                    generator=gen)
 
     def mode_labels(self, x):
         """Returns which side of each well every sample sits on, as a (n, n_wells) 0/1 tensor
@@ -337,8 +388,7 @@ class ManyWell(ModeCoverage, ExactTarget):
         exact, coming from the same quadrature that fixes log Z. 'w1_x1' is the integral of
         |F_n - F| between the pooled coordinates' weighted CDF and that exact CDF, computed in
         closed form on the quadrature grid, so no Monte-Carlo reference adds its own noise. On
-        exact draws of n = 1000 over 20 seeds it reads 0.0078 +- 0.0041, where a reference draw of
-        the same size read 0.0111 +- 0.0077.
+        exact draws of n = 1000 it reads 0.0078 +- 0.0041 over 20 seeds.
 
         Args are Target.compute_metrics', plus:
             * n_bins (int): Number of bins of the histogram comparison (default is 200)

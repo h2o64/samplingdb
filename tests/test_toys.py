@@ -54,7 +54,7 @@ def test_rings_score_is_analytic_and_exact_samples_land_on_the_rings():
 
 
 def test_rings_train_split_covers_every_ring_with_the_wrong_weights():
-    """One chain per ring: the widths are right, the ring weights are not"""
+    """Chains drawn on every ring by a skewed allocation: the widths are right, the weights not"""
     target = Rings()
     x = target.train_samples(n=2048)
     assert len(target.mode_labels(x).unique()) == target.n_modes
@@ -105,27 +105,25 @@ def test_checkerboard_score_is_exactly_zero():
     assert float(target.score(x).abs().max()) == 0.0
 
 
-def test_checkerboard_train_split_only_partly_equilibrates_its_weights():
-    """Squares meet at their corners, so a 0.5 step crosses diagonally and the weights half-fix
+def test_checkerboard_train_split_starves_the_heavy_squares():
+    """The skewed allocation gives the heavy squares the smallest shares, so the alternation flips
 
-    Measured: the heavy-to-light weight ratio comes out at 1.84 against the true 3.0, which is a
-    chain that has started to equilibrate but has nowhere near finished -- mode-weight TV 0.21
-    against 0.06 for an exact draw of the same size.
+    Twenty steps of size 0.5 from a uniform point of each square leak little across the corners
+    where the squares meet, so the shares stay those of the allocation.
     """
     target = Checkerboard()
     x = target.train_samples(n=2048)
     assert torch.isfinite(target.log_prob(x)).all()
     assert len(target.mode_labels(x).unique()) == target.n_modes
 
-    # The alternation is there but too weak, and it is the heavy squares that gain
+    # The heavy squares, three times the light ones under the target, get less than them here
     hist = target.compute_mode_weights(x)[0]
     heavy = target.mode_weights > target.mode_weights.mean()
-    ratio = float(hist[heavy].mean() / hist[~heavy].mean())
-    assert 1.3 < ratio < 2.5
+    assert float(hist[heavy].mean() / hist[~heavy].mean()) < 1.0
 
     train = target.compute_metrics(x, compute_standard_metrics=False)
     exact = target.compute_metrics(target.test_samples(n=2048), compute_standard_metrics=False)
-    assert train['tv_weights'] > 2.5 * exact['tv_weights']
+    assert train['tv_weights'] > 5 * exact['tv_weights']
 
 
 def test_eight_gaussians_sit_on_a_circle_with_equal_weights():
@@ -145,8 +143,8 @@ def test_eight_gaussians_sit_on_a_circle_with_equal_weights():
     assert len(target.mode_labels(x).unique()) == 8
     assert torch.allclose(target.score(x), score_autograd(target, x), rtol=1e-9, atol=1e-9)
 
-    # Equal weights mean one chain per mode is the right allocation, so the train split is
-    # unbiased in its weights -- the same stratification GMM-40 shows
+    # Equal weights get the skewed allocation along the index order, so the train split visits
+    # every mode with the wrong weights rather than stratifying them
     train = target.compute_metrics(target.train_samples(n=2048), compute_standard_metrics=False)
     assert train['perc_forgotten_modes'] == 0.0
-    assert train['tv_weights'] < 0.05
+    assert train['tv_weights'] > 0.4

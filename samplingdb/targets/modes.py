@@ -4,6 +4,8 @@
 import math
 import torch
 from ..metrics.weights import normalize_weights
+from .base import cycle, generator
+from .kernels import random_walk_mh
 
 
 def mode_entropy(hist):
@@ -31,6 +33,27 @@ def forgotten_modes(hist, weights, tol=0.05):
     return float((hist < tol * weights.min()).to(hist.dtype).mean())
 
 
+def skewed_allocation(weights, ratio):
+    """Returns the share of train chains every mode gets, far from its true weight
+
+    Modes are ranked by true weight, heaviest first, ties keeping their index order, and the shares
+    are geometric along that ranking from 1 to ratio: the heaviest mode gets the smallest share and
+    the lightest the largest. Equal weights -- GMM-40, MoS, EightGaussians -- get the same skew
+    along the index order, where an allocation by weight would be stratified sampling and give the
+    proportions away.
+
+    Args:
+        * weights (torch.Tensor of shape (n_modes,)): True mode weights
+        * ratio (float): Largest share over the smallest
+
+    Returns:
+        * share (torch.Tensor of shape (n_modes,)): Shares, summing to one
+    """
+    rank = torch.argsort(torch.argsort(-weights, stable=True), stable=True)
+    share = ratio ** (rank.to(weights.dtype) / max(len(weights) - 1, 1))
+    return share / share.sum()
+
+
 class ModeCoverage:
     """Mixin giving a target with a discrete mode descriptor the mixture coverage panel
 
@@ -50,11 +73,71 @@ class ModeCoverage:
     Both shapes are normalised to (n_groups, n_states) here, so the four helpers above are written
     once. The empirical weights are the fraction of the samples carrying each label, except for a
     Mixture, which overrides compute_mode_weights with its mean responsibilities.
+
+    The train recipe of a one-group target lives here too, since it only needs the modes: a
+    subclass provides sample_modes and train_step_size.
     """
+
+    train_recipe = 'skewed-modes'
+
+    # Ratio between the largest and the smallest share of train chains a mode gets
+    train_skew = 10.0
 
     def mode_labels(self, x):
         """Returns the state index of every sample, of shape (n,) or (n, n_groups)"""
         raise NotImplementedError('mode_labels is not implemented.')
+
+    def sample_modes(self, modes, generator=None):
+        """Draws one exact sample from each given mode, on the device of modes
+
+        Args:
+            * modes (torch.Tensor of shape (n,)): Mode index of every sample
+            * generator (torch.Generator or None): RNG, on the device of modes (default is None)
+
+        Returns:
+            * x (torch.Tensor of shape (n, dim)): Exact draws, x[i] from mode modes[i]
+        """
+        raise NotImplementedError('sample_modes is not implemented.')
+
+    def train_modes(self, n, generator=None):
+        """Draws the mode every train chain starts in, from skewed_allocation's shares
+
+        Args:
+            * n (int): Number of chains
+            * generator (torch.Generator or None): RNG, on the target's device (default is None)
+
+        Returns:
+            * modes (torch.Tensor of shape (n,)): Mode index of every chain
+        """
+        share = skewed_allocation(self.mode_weights.to(torch.float64), self.train_skew)
+        return torch.multinomial(share, n, replacement=True, generator=generator)
+
+    def generate_train_samples(self, n, seed=0, x0=None, n_steps=20, step_size=None):
+        """Runs the skewed-modes recipe: every mode, in the wrong proportions
+
+        Each chain draws a mode from skewed_allocation, the heaviest mode getting the fewest chains,
+        starts from an exact draw of that mode, and takes n_steps random-walk Metropolis steps of
+        size train_step_size. Every mode is visited with its own shape, in the proportions of the
+        allocation. The steps are few so that no chain crosses to another mode and undoes them.
+
+        Args:
+            * n (int): Number of samples, one per chain
+            * seed (int): Seed of the recipe (default is 0)
+            * x0 (torch.Tensor of shape (m, dim) or None): Starting points, chain i starting from
+                x0[i % m]; None draws them as above (default is None)
+            * n_steps (int): Random-walk steps per chain (default is 20)
+            * step_size (float or None): Proposal scale; None uses train_step_size
+                (default is None)
+
+        Returns:
+            * x (torch.Tensor of shape (n, dim)): The biased samples
+        """
+        gen = generator(seed, device=self.device)
+        if x0 is None:
+            x0 = self.sample_modes(self.train_modes(n, generator=gen), generator=gen)
+        step_size = self.train_step_size if step_size is None else step_size
+        return random_walk_mh(self.log_prob, cycle(self.cast(x0), n), n_steps, step_size,
+                              generator=gen)
 
     @property
     def true_mode_weights(self):

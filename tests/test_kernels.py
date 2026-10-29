@@ -5,7 +5,8 @@ import math
 import torch
 from samplingdb import GMM40, metrics
 from samplingdb.targets.base import generator
-from samplingdb.targets.kernels import mala, random_walk_mh, student_t2
+from samplingdb.targets.kernels import langevin, mala, random_walk_mh, steepest_descent, \
+    student_t2, tempered_mala
 from nrpt import hmc
 
 
@@ -55,6 +56,81 @@ def test_traces_are_thinned_as_asked():
     trace = mala(log_prob, score, x0, 100, 0.2, generator=generator(0), return_trace=True,
                  thin=10)
     assert trace.shape == (10, 8, 4)
+
+
+def test_adaptation_finds_each_chains_own_step_and_then_freezes_it():
+    """Chains of very different scales each adapt their own step, then sample with it fixed
+
+    Rows of scale 0.01 and 10 cannot share a step size; after the adaptation every chain accepts
+    near its target, and the variance per chain matches its own scale.
+    """
+    scale = torch.tensor([0.01] * 500 + [10.0] * 500, dtype=torch.float64)[:, None]
+    log_prob = lambda x: -0.5 * ((x / scale) ** 2).sum(-1)
+    score = lambda x: -x / scale ** 2
+    x0 = torch.zeros(1000, 4, dtype=torch.float64)
+    trace, acceptance = mala(log_prob, score, x0, 600, 1e-3, generator=generator(0),
+                             return_trace=True, thin=10, n_adapt=400, return_acceptance=True,
+                             per_chain=True)
+
+    # Only the moves after the adaptation are traced
+    assert trace.shape == (20, 1000, 4)
+    ratio = trace.std(dim=(0, 2)) / scale[:, 0]
+    assert abs(float(ratio[:500].mean()) - 1.0) < 0.1
+    assert abs(float(ratio[500:].mean()) - 1.0) < 0.1
+    assert 0.4 < float(acceptance.mean()) < 0.75
+
+    # The same holds for the random walk, which aims at a quarter of its proposals
+    x = random_walk_mh(log_prob, x0, 600, 1e-3, generator=generator(0), n_adapt=400)
+    assert abs(float((x / scale).std()) - 1.0) < 0.1
+
+
+def test_tempered_mala_samples_each_chain_at_its_own_temperature():
+    """Chain i samples exp(log_prob / factor_i), so a Gaussian's variance scales with the factor"""
+    log_prob, score = gaussian()
+    factors = torch.tensor([0.5] * 1000 + [2.0] * 1000, dtype=torch.float64)
+    x0 = torch.zeros(2000, 4, dtype=torch.float64)
+    trace = tempered_mala(log_prob, score, x0, factors, 300, 10, 10, generator=generator(0))
+    assert trace.shape == (10, 2000, 4)
+    assert abs(float(trace[:, :1000].var()) - 0.5) < 0.05
+    assert abs(float(trace[:, 1000:].var()) - 2.0) < 0.2
+
+
+def test_langevin_samples_the_boltzmann_law_at_each_trajectorys_temperature():
+    """BAOAB on a harmonic well: positions N(0, kT / k), velocities N(0, kT / m), per trajectory"""
+    stiffness, mass = 4.0, torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+    kT = torch.tensor([0.5] * 2000 + [2.0] * 2000, dtype=torch.float64)[:, None]
+    x0 = torch.zeros(4000, 3, dtype=torch.float64)
+    x, velocity = langevin(lambda y: -stiffness * y, x0, 2000, 0.01, mass, kT, 1.0,
+                           generator=generator(0), return_velocities=True)
+    for rows, value in [(slice(0, 2000), 0.5), (slice(2000, 4000), 2.0)]:
+        assert abs(float(x[rows].var()) * stiffness / value - 1.0) < 0.05
+        assert abs(float((velocity[rows] ** 2 * mass).mean()) / value - 1.0) < 0.05
+
+    # A trace keeps one position every thin steps, and carrying the velocities over makes two
+    # calls one trajectory
+    trace = langevin(lambda y: -stiffness * y, x0[:8], 20, 0.01, mass, 1.0, 1.0,
+                     generator=generator(1), return_trace=True, thin=5)
+    assert trace.shape == (4, 8, 3)
+    whole = langevin(lambda y: -stiffness * y, x0[:8], 20, 0.01, mass, 1.0, 1.0,
+                     generator=generator(2))
+    gen = generator(2)
+    half, velocities = langevin(lambda y: -stiffness * y, x0[:8], 10, 0.01, mass, 1.0, 1.0,
+                                generator=gen, return_velocities=True)
+    resumed = langevin(lambda y: -stiffness * y, half, 10, 0.01, mass, 1.0, 1.0, generator=gen,
+                       velocities=velocities)
+    assert torch.equal(whole, resumed)
+
+
+def test_steepest_descent_moves_a_clash_no_faster_than_a_relaxed_row():
+    """The largest coordinate moves max_step per step, however large the force behind it"""
+    stiffness = torch.tensor([1.0, 1e10], dtype=torch.float64)[:, None]
+    x0 = torch.full((2, 3), 0.5, dtype=torch.float64)
+    x = steepest_descent(lambda y: -stiffness * y, x0, 1, 0.01)
+    assert torch.allclose(x, torch.full((2, 3), 0.49, dtype=torch.float64))
+
+    # Both rows end within one step of the minimum
+    x = steepest_descent(lambda y: -stiffness * y, x0, 100, 0.01)
+    assert float(x.abs().max()) <= 0.01
 
 
 def test_student_t2_matches_its_quantile_function():

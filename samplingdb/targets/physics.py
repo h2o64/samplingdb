@@ -6,7 +6,9 @@ import torch
 from ..data import fetch_reference, read_rows
 from ..metrics.structure import compute_structure_metrics
 from ..metrics.weights import normalize_weights
-from .base import Target, generator
+from .base import Target, chain_layout, cycle, generator, interleave
+from .kernels import temperature_ladder
+from .modes import skewed_allocation
 
 
 def minimum_image(delta, box):
@@ -43,6 +45,11 @@ class PeriodicPairMixture(Target):
     reference_folder = 'swapmc'
     spatial_dim = 2
     swap_channels = ()
+    train_recipe = 'basin-mc'
+
+    # Basins of the train recipe, and the largest share of the chains one gets over the smallest
+    train_n_basins = 100
+    train_skew = 10.0
 
     def __init__(self, name, species, sigma, epsilon, density, temperature, cutoff_factor=2.5,
                  dtype=torch.float32):
@@ -187,13 +194,10 @@ class PeriodicPairMixture(Target):
     def log_prob(self, x):
         """Evaluates log gamma(x) = -E(x) / T, with E the TOTAL energy
 
-        WARNING: this normalisation is a real fork, and it was settled by experiment rather than
-        by reading. The implementation the released configurations of Jung et al. 2023 came from
-        defines U = E / n_particles and samples exp(-U / T), i.e. exp(-E / (N T)). Running the
-        released protocol's own Metropolis kernel from the released T = 1.0 configurations leaves
-        E/N at -1.930 +- 0.146 under exp(-E / T) -- stationary, so that is the law they were drawn
-        from -- while exp(-E / (N T)) drives E/N to +14.4 within 200 time units.
-        tests/test_physics.py records this as a stationarity check.
+        WARNING: the implementation behind Jung et al. 2023 defines U = E / n_particles and writes
+        its law as exp(-U / T), i.e. exp(-E / (N T)). The configurations released with that paper
+        are stationary under exp(-E / T) and not under exp(-E / (N T)), so exp(-E / T) is the law
+        here. tests/test_physics.py keeps that stationarity check.
         """
         return -self.energy(x) / self.temperature
 
@@ -288,52 +292,117 @@ class PeriodicPairMixture(Target):
         array = read_rows(path, n, command + ', with more chains or a longer run')
         return torch.as_tensor(array, dtype=self.dtype, device=self.device)
 
-    def generate_train_samples(self, n):
-        """Runs the displacement-only Metropolis recipe
+    def generate_train_samples(self, n, seed=0, x0=None, n_chains=1000, n_basins=None,
+                               basin_time_units=1500, n_time_units=100, thin=5, temperatures=None,
+                               p_swap=None):
+        """Runs the basin recipe: random displacements inside a few basins, in the wrong proportions
 
-        This is the one train split in the catalog that is literature-native rather than
-        host-designed: displacement-only Metropolis-Hastings is exactly the run the paper made to
-        establish that swap moves were necessary at the low temperature. One move picks a single
-        particle uniformly and proposes a N(0, 0.065^2) displacement (Frenkel & Smit's standard
-        scale); one time unit is n_particles attempted moves; the chains run train_time_units time
-        units, far short of the 5 x 10^4 the released protocol needs.
+        n_basins chains start from the offset-row lattice of lattice_configuration, each with its
+        own random assignment of the particles to the sites and a N(0, 0.05^2) jitter, and run
+        basin_time_units of swap_monte_carlo: displacements of scale 0.065 and, with probability
+        p_swap, swaps through this mixture's swap_channels, basin b at the target temperature
+        times a factor running geometrically over train_temperatures with b (temperature_ladder).
+        Each of the n_chains train chains then draws a basin, with shares geometric from 1 to
+        train_skew against those factors so that the coldest basin gets the most chains, and runs
+        displacements only, at its own factor of the same ladder over the chains: n_time_units
+        before keeping one configuration every thin time units until the chains hold n between
+        them. The split is those configurations frame by frame.
 
-        NOTE: chains start from a jittered square lattice rather than the protocol's uniformly
-        random configuration. A uniform start at this density overlaps particles, so its energy is
-        ~1e25 and thousands of sweeps go into unjamming rather than into the composition ordering
-        this split is meant to get wrong. The lattice is deterministic and fixed, which is the
-        recipe's second knob.
+        Every frame therefore comes from random displacements inside one of a few basins, the
+        literature's kernel for these glasses, while the swaps only make the basins: displacements
+        alone from a lattice never reach the test energies of the supercooled ternary. The energy
+        histogram spans the test one at both ends, through the cold basins and the hot chains. The
+        T = 1.0 ternary is a liquid and leaves its basins, so its split is a liquid at the wrong
+        temperatures. The binary takes no swaps, which do not help it, and colder chains instead,
+        from offset rows, which suit its hexagonal A crystal. The recipe takes about half a minute
+        on a GPU and minutes on the CPU.
 
         Args:
-            * n (int): Number of configurations, one per chain
+            * n (int): Number of samples
+            * seed (int): Seed of the recipe (default is 0)
+            * x0 (torch.Tensor of shape (m, dim) or None): Starting configurations, chain i
+                starting from x0[i % m] with no basin phase, which is how a split continues; None
+                makes the basins (default is None)
+            * n_chains (int): Number of chains, at most n (default is 1000)
+            * n_basins (int or None): Number of basins; None uses train_n_basins (default is None)
+            * basin_time_units (int): Time units of the basin phase (default is 1500)
+            * n_time_units (int): Time units of displacements before any configuration is kept
+                (default is 100)
+            * thin (int): Time units between kept configurations (default is 5)
+            * temperatures (tuple of two floats or None): Lowest and highest temperature factor;
+                None uses train_temperatures (default is None)
+            * p_swap (float or None): Probability of a swap move in the basin phase; None uses
+                train_p_swap (default is None)
 
         Returns:
-            * x (torch.Tensor of shape (n, dim)): The non-equilibrium samples
+            * x (torch.Tensor of shape (n, dim)): The biased samples
         """
-        gen = generator(0)
-        x = self.lattice_configuration(n, jitter=0.05, generator=gen).to(self.device)
-        return swap_monte_carlo(self, x, n_time_units=self.train_time_units, step_size=0.065,
-                                p_swap=0.0, generator=gen)
+        gen = generator(seed, device=self.device)
+        n_chains, n_frames = chain_layout(n, n_chains)
+        if temperatures is None:
+            temperatures = self.train_temperatures
+        compile = self.device.type == 'cuda'
+        run = lambda x, time_units, factors, **kwargs: swap_monte_carlo(
+            self, self.positions(x), time_units, temperatures=factors, generator=gen,
+            compile=compile, **kwargs)
 
-    def lattice_configuration(self, n, jitter=0.0, generator=None):
+        if x0 is None:
+            # Make the basins, then give the coldest the most chains
+            n_basins = n_basins or self.train_n_basins
+            x0 = self.lattice_configuration(n_basins, jitter=0.05, offset=True, shuffle=True,
+                                            generator=gen)
+            factors = temperature_ladder(n_basins, temperatures, dtype=self.dtype,
+                                         device=self.device)
+            p_swap = self.train_p_swap if p_swap is None else p_swap
+            basins = run(self.cast(x0).reshape(n_basins, -1), basin_time_units, factors,
+                         p_swap=p_swap)
+            shares = skewed_allocation(factors.double(), self.train_skew)
+            x = basins[torch.multinomial(shares, n_chains, replacement=True, generator=gen)]
+        else:
+            x = cycle(self.cast(x0).reshape(-1, self.dim), n_chains)
+
+        # Displacements only, at the chains' own temperatures
+        factors = temperature_ladder(n_chains, temperatures, dtype=self.dtype, device=self.device)
+        x = run(x, n_time_units, factors)
+        trace = run(x, n_frames * thin, factors, return_trace=True, thin=thin)
+        return interleave(trace, n)
+
+    def lattice_configuration(self, n, jitter=0.0, offset=False, shuffle=False, generator=None):
         """Returns n copies of a square lattice filling the box, optionally jittered
 
         Args:
             * n (int): Number of configurations
             * jitter (float): Scale of the Gaussian noise added to every coordinate
                 (default is 0.0)
-            * generator (torch.Generator or None): RNG of the jitter (default is None)
+            * offset (bool): Whether every second row is shifted by half a spacing, which puts
+                every site's nearest neighbours closer to a hexagonal arrangement
+                (default is False)
+            * shuffle (bool): Whether every configuration assigns the particles to a random
+                subset of the sites rather than to the first n_particles in order
+                (default is False)
+            * generator (torch.Generator or None): RNG of the jitter and the shuffle, on the
+                target's device when either is used (default is None)
 
         Returns:
             * x (torch.Tensor of shape (n, n_particles, spatial_dim)): Configurations
         """
         side = int(math.ceil(self.n_particles ** (1.0 / self.spatial_dim)))
-        axis = torch.arange(side, dtype=self.dtype) * self.box / side
+        device = self.device if offset or shuffle else 'cpu'
+        axis = torch.arange(side, dtype=self.dtype, device=device) * self.box / side
         grid = torch.stack(torch.meshgrid(*([axis] * self.spatial_dim), indexing='ij'), dim=-1)
-        sites = grid.reshape(-1, self.spatial_dim)[:self.n_particles]
-        x = sites[None].expand(n, self.n_particles, self.spatial_dim).clone()
+        if offset:
+            row = torch.arange(side, device=device) % 2
+            grid[..., 1] = grid[..., 1] + 0.5 * self.box / side * row[:, None]
+        sites = grid.reshape(-1, self.spatial_dim)
+        if shuffle:
+            order = torch.argsort(torch.rand(n, len(sites), generator=generator, device=device),
+                                  dim=-1)[:, :self.n_particles]
+            x = sites[order]
+        else:
+            x = sites[:self.n_particles][None].expand(n, self.n_particles, self.spatial_dim).clone()
         if jitter > 0.0:
-            x = x + jitter * torch.randn(x.shape, generator=generator, dtype=self.dtype)
+            x = x + jitter * torch.randn(x.shape, generator=generator, dtype=self.dtype,
+                                         device=device)
         return x
 
     def spec(self):
@@ -347,11 +416,6 @@ class PeriodicPairMixture(Target):
                      'species': self.species, 'density': self.density,
                      'cutoff_factor': self.cutoff_factor, 'temperature': self.temperature})
         return spec
-
-    def train_cache_key(self, n):
-        """Appends the chain length and the recipe tag, which the density spec does not cover"""
-        return (super().train_cache_key(n) + '_' + self.train_recipe
-                + '_t' + str(self.train_time_units))
 
     def compute_metrics(self, samples, weights=None, ref_samples=None,
                         compute_standard_metrics=True, skip_costly_metrics=True, generator=None,
@@ -411,9 +475,8 @@ class KobAndersen2D(PeriodicPairMixture):
     what keeps the score continuous. They are SPECIFIC to the cutoff: PINNED_SMOOTHING holds the
     values the released configurations of Jung et al. 2023 were generated with at the cutoff 2.5,
     which are also those of ParticlesMC's SmoothLennardJones, and any other cutoff_factor solves
-    for its own with
-    smoothing_coefficients(), because a triple carried over from 2.5 would leave the potential
-    discontinuous where it is actually truncated.
+    for its own with smoothing_coefficients(), because a triple carried over from 2.5 would leave
+    the potential discontinuous where it is truncated.
 
     NOTE: because the pinned triple is quoted to 8 decimals rather than solved, W leaves a residual
     of ~1e-9 at the cutoff instead of ~1e-17. That is the specification, since it is what generated
@@ -425,9 +488,12 @@ class KobAndersen2D(PeriodicPairMixture):
     """
 
     generator_command = 'swap_mc/generate.py --temperature <T>'
-    train_time_units = 2000
-    train_recipe = 'displacement-local-v1'
     swap_channels = ((0, 2), (1, 2))
+
+    # The train basins are made with this mixture's own swaps, at ParticlesMC's rate, and
+    # temperature factors either side of 1
+    train_p_swap = 0.2
+    train_temperatures = (0.8, 1.25)
 
     # The smoothing triple the released data was generated with, at the cutoff it belongs to
     PINNED_SMOOTHING = {2.5: (0.04049023795, -0.00970155098, 0.00062012616)}
@@ -489,9 +555,9 @@ class KobAndersen2D(PeriodicPairMixture):
         """Evaluates the derivative of the smoothed pair potential
 
         WARNING: the smoothing terms differentiate to +2 C2 r / sigma^2 + 4 C4 r^3 / sigma^4.
-        The released implementation's gradient instead carries them as negative powers of r, which
-        agrees with autograd only where the Lennard-Jones terms dominate -- it is 1.8x off at r = 2.0
-        and 78x off at r = 2.45. tests/test_physics.py checks this derivative against autograd.
+        The released implementation's gradient carries them as negative powers of r, which agrees
+        with autograd only where the Lennard-Jones terms dominate, so it is not ported here.
+        tests/test_physics.py checks this derivative against autograd.
         """
         _, c2, c4 = self.smoothing
         ratio = sigma / distances
@@ -510,44 +576,40 @@ class KobAndersenBinary(PeriodicPairMixture):
     (eps_BB, sigma_BB) = (0.5, 0.88), N = 64 at rho = 1.0 so the box is exactly 8, and
     n_A = 51, n_B = 13.
 
-    NOTE: only the VALUE is shifted to zero at the cutoff, not the derivative -- that is what the
-    paper specifies, so the force has a small jump there. The paper also mentions a logarithmic
-    core below 0.8 sigma_AA without giving its form; it is not implemented, and it does not touch
-    the equilibrium region (0.28% of T = 0.2 configurations hold a pair below 0.8). The ternary
-    KobAndersen2D above instead carries C0/C2/C4 smoothing, which is one of several reasons the
-    two are different targets.
+    NOTE: only the VALUE is shifted to zero at the cutoff, not the derivative, as the paper
+    specifies, so the force has a small jump there. The paper also mentions a logarithmic core
+    below 0.8 sigma_AA without giving its form; it is not implemented, and it does not touch the
+    equilibrium region, where pairs that close are rare. The ternary KobAndersen2D smooths its
+    cutoff instead, one of several reasons the two are different targets.
 
-    WARNING: this composition is deliberately NOT swap-friendly, which is the whole point of it:
-    conventional Monte Carlo does not equilibrate it below the glass transition and swap moves do
-    not help, so swap_channels is empty and the reference algorithm is parallel tempering
-    (gen/parallel_tempering/generate.py). No reference ensemble was published with the paper. This
-    library's set, published as pt/ka-binary-N64-T0.2_<spec_id>.npy and downloaded by
-    test_samples on first use, holds 30 720 configurations at N = 64 and T = 0.2, 91% of them
-    independent. It comes from non-reversible parallel tempering on ten levels geometric in T from
-    0.6 down to 0.2, with half the chains started from deep configurations and half from the melt,
-    and the two starts agree on every audited observable. No other temperature or size has a set.
+    WARNING: this composition is NOT swap-friendly: conventional Monte Carlo does not equilibrate
+    it below the glass transition and swap moves do not help, so swap_channels is empty and the
+    reference set comes from parallel tempering (gen/parallel_tempering/generate.py). The paper
+    publishes no reference ensemble. This library's set, published as
+    pt/ka-binary-N64-T0.2_<spec_id>.npy and downloaded by test_samples on first use, holds
+    30 720 configurations at N = 64 and T = 0.2 from non-reversible parallel tempering on ten
+    levels geometric in T from 0.6 to 0.2 (see docs/reference-sets.md). No other temperature or
+    size has a set.
 
-    WARNING: at T = 0.2 the equilibrium state is partly CRYSTALLINE, not a glass. In 62
-    parallel-tempering chains (20 levels, beta_min 0.1, 8192 collection scans; 2026-10-09) the
-    A particles form a hexagonal crystallite spanning the periodic box next to a B-rich amorphous
-    band: 48% of A particles have |psi_6| > 0.8 with six neighbours, and the more crystalline
-    configurations have the lower energy (E/N -3.216 against -3.195). That is the known behaviour
-    of the 2D 80:20 mixture (Bruening et al., J. Phys.: Condens. Matter 21, 035117, 2009), which is
-    why 2D glass studies use 65:35; the paper calls T = 0.2 "the glass" and validates its own
-    reference on free energies alone. The density is kept as the paper defines it, so numbers stay
-    comparable, but what a sampler has to get right here is the crystallite and the band around it:
-    along the parallel-tempering chains the B-B contacts decorrelate in >= 1257 scans and the
-    crystallite's orientation in >= 772, against 137 for the energy. Swap moves do not reach it
-    either -- A<->B swaps are accepted at 6.4e-6 at T = 0.2, and neither Jung et al.'s third
-    species nor Parmar, Ozawa and Berthier's polydisperse defect, coupled in exactly through an
-    expanded ensemble, decorrelated it faster than displacements.
+    WARNING: at T = 0.2 the equilibrium state, which Cheng et al. 2026 call the glass, is partly
+    CRYSTALLINE: the A particles form a hexagonal crystallite spanning the periodic box next to a
+    B-rich amorphous band, and the more crystalline configurations have the lower energy. That is
+    the known behaviour of the 2D 80:20 mixture (Bruening et al. 2009), which 2D glass studies
+    avoid with a 65:35 composition. The composition is kept as the paper defines it, so numbers
+    stay comparable, and what a sampler has to get right here is the crystallite and the band
+    around it: the B-B contacts and the crystallite's orientation decorrelate several times more
+    slowly than the energy.
     """
 
     reference_folder = 'pt'
     generator_command = 'parallel_tempering/generate.py --target <name>'
-    train_time_units = 2000
-    train_recipe = 'displacement-local'
     swap_channels = ()
+
+    # No swaps, which do not help here, and temperature factors down to a quarter: displacements
+    # alone at the target temperature leave the crystalline low end uncovered, while the cold
+    # chains shed their thermal energy fast
+    train_p_swap = 0.0
+    train_temperatures = (0.25, 1.25)
 
     def __init__(self, temperature=0.2, n_particles=64, density=1.0, dtype=torch.float32):
         """Builds the binary Kob-Andersen mixture
@@ -597,7 +659,7 @@ class KobAndersenBinary(PeriodicPairMixture):
         return torch.where(distances < self.cutoff_factor * sigma, value, torch.zeros_like(value))
 
 
-def swap_move(target, x, is_swap, index, partner, noise, u):
+def swap_move(target, x, is_swap, index, partner, noise, u, temperatures):
     """Applies one Metropolis move per chain from pre-drawn randomness
 
     A displacement has partner = index and moves that particle by noise; a swap exchanges the
@@ -611,6 +673,8 @@ def swap_move(target, x, is_swap, index, partner, noise, u):
         * partner (torch.Tensor of shape (n_chains,)): Second swapped particle, index otherwise
         * noise (torch.Tensor of shape (n_chains, spatial_dim)): Proposed displacement
         * u (torch.Tensor of shape (n_chains,)): Uniform draws of the Metropolis test
+        * temperatures (torch.Tensor of shape (n_chains,) or float): Temperature factor of every
+            chain, which divides the log-ratio
 
     Returns:
         * x (torch.Tensor of the same shape): Configurations after the move
@@ -625,12 +689,13 @@ def swap_move(target, x, is_swap, index, partner, noise, u):
     y[chains, partner] = torch.where(is_swap[:, None], x[chains, index], y[chains, partner])
     after = target.local_log_prob(y, index) + torch.where(
         is_swap, target.local_log_prob(y, partner), zero)
-    accept = torch.log(u) < after - before
+    accept = torch.log(u) < (after - before) / temperatures
     return torch.where(accept[:, None, None], y, x), accept
 
 
 def swap_monte_carlo(target, x, n_time_units, step_size=0.065, p_swap=0.0, swap_channels=None,
-                     generator=None, return_acceptance=False, compile=False):
+                     temperatures=1.0, generator=None, return_trace=False, thin=1,
+                     return_acceptance=False, compile=False):
     """Runs swap Monte Carlo, one chain per row of x
 
     The move set is TheDisorderedOrganization/ParticlesMC's, which is the field's reference
@@ -647,8 +712,8 @@ def swap_monte_carlo(target, x, n_time_units, step_size=0.065, p_swap=0.0, swap_
     therefore jumps on every accepted swap, so a relaxation time read from it is not the
     structural one.
 
-    NOTE: p_swap = 0 recovers the displacement-only chain, which is what the train splits use and
-    what fails to equilibrate the deeply supercooled state.
+    NOTE: p_swap = 0 recovers the displacement-only chain, which is what fails to equilibrate the
+    deeply supercooled state.
 
     NOTE: every random number is drawn on the generator's device (the CPU when generator is None)
     and the loop never synchronises with the host, so a CUDA generator runs the whole chain on the
@@ -656,10 +721,9 @@ def swap_monte_carlo(target, x, n_time_units, step_size=0.065, p_swap=0.0, swap_
     generator gives bit-identical train splits on every device.
 
     WARNING: every move is scored with local_log_prob, which is only log_prob's local piece while
-    log_prob is -E / T. A subclass that changes that law has to override local_log_prob too, or
-    this kernel would silently sample a different density than the one it was handed -- the exact
-    failure the exp(-E / (N T)) fork was, so the agreement is CHECKED once before the run rather
-    than trusted.
+    log_prob is -E / T. A subclass that changes that law has to override local_log_prob too,
+    otherwise this kernel samples a different density than the one it was handed. The function
+    asserts log_prob = -energy / temperature on x before the first move.
 
     Args:
         * target (PeriodicPairMixture): The target, providing the energy and the temperature
@@ -673,15 +737,21 @@ def swap_monte_carlo(target, x, n_time_units, step_size=0.065, p_swap=0.0, swap_
         * swap_channels (list of tuple of two ints or None): Species pairs a swap may exchange;
             None uses target.swap_channels, which for the ternary mixture is [(0, 2), (1, 2)] --
             A<->C and B<->C, never A<->B, exactly as ParticlesMC pools them (default is None)
+        * temperatures (torch.Tensor of shape (n_chains,) or float): Temperature factor of every
+            chain: chain i samples exp(log_prob / temperatures[i]) (default is 1.0)
         * generator (torch.Generator or None): RNG; its device is where the draws are made
             (default is None)
+        * return_trace (bool): Whether to return one configuration every thin time units instead
+            of the last one (default is False)
+        * thin (int): Time units between kept configurations when return_trace (default is 1)
         * return_acceptance (bool): Whether to also return the mean acceptance rate per move type
             (default is False)
         * compile (bool): Whether to run swap_move through torch.compile, about 9x faster on a GPU
             with a CUDA generator; the draws are unchanged (default is False)
 
     Returns:
-        * x (torch.Tensor of shape (n_chains, dim)): The final configurations
+        * x (torch.Tensor of shape (n_chains, dim), or (n_time_units // thin, n_chains, dim) if
+            return_trace): The final configurations, or the thinned trace
         if return_acceptance:
             * acceptance (dict): 'displacement' and 'swap' acceptance rates, and the realised
                 'swap_fraction' of attempted moves
@@ -702,9 +772,10 @@ def swap_monte_carlo(target, x, n_time_units, step_size=0.065, p_swap=0.0, swap_
     channels = [(target.species_indexes(a).to(device), target.species_indexes(b).to(device))
                 for a, b in swap_channels]
     counts = torch.zeros(4, dtype=torch.float64, device=device)
+    trace = []
 
     # One time unit is n_particles attempted moves, ParticlesMC's sweepstep
-    for _ in range(n_time_units * n_particles):
+    for step in range(n_time_units * n_particles):
         # 1. Pick the move type, the particle it acts on, and a swap partner where it is a swap
         is_swap = torch.rand(n_chains, generator=generator, dtype=x.dtype, device=draws) < p_swap
         is_swap = is_swap.to(device)
@@ -729,11 +800,13 @@ def swap_monte_carlo(target, x, n_time_units, step_size=0.065, p_swap=0.0, swap_
         noise = step_size * torch.randn(n_chains, spatial_dim, generator=generator, dtype=x.dtype,
                                         device=draws).to(device)
         u = torch.rand(n_chains, generator=generator, dtype=x.dtype, device=draws).to(device)
-        x, accept = move(target, x, is_swap, index, partner, noise, u)
+        x, accept = move(target, x, is_swap, index, partner, noise, u, temperatures)
         counts += torch.stack([(accept & ~is_swap).sum(), (~is_swap).sum(),
                                (accept & is_swap).sum(), is_swap.sum()]).to(counts.dtype)
+        if return_trace and (step + 1) % (thin * n_particles) == 0:
+            trace.append(x.reshape(n_chains, -1).clone())
 
-    out = x.reshape(n_chains, -1)
+    out = torch.stack(trace) if return_trace else x.reshape(n_chains, -1)
     if return_acceptance:
         counts = counts.tolist()
         acceptance = {'displacement': counts[0] / counts[1] if counts[1] > 0 else float('nan'),

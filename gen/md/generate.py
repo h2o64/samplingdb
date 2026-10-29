@@ -11,32 +11,26 @@ from samplingdb.targets import spec_id
 from samplingdb.targets.molecular import PEPTIDE_SYSTEMS
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from diagnostics import chain_mean_dispersion, effective_sample_size
-from dynamics import harmonic_log_prob, harmonic_score, minimised_positions, run_batched_dynamics
+from dynamics import harmonic_log_prob, harmonic_score, run_batched_dynamics
 from manifest import manifest
 from nrpt import (PotentialReference, dynamics_explorer, linear_schedule,
                   non_reversible_parallel_tempering)
 
-# Per system. n_rungs is ~2 Lambda under SOLUTE tempering, which is where the ladder length is
-# set: scaling only the soft terms takes the bond and angle vibrations out of the swap statistic,
-# and on these systems they are 1.55x to 1.70x of sd(E) all by themselves. Measured on Ace-A-Nme
-# at beta_min 0.4, Lambda goes 2.7556 global -> 1.265 solute, so the ladder halves.
+# Per system. n_rungs is ~2 Lambda under solute tempering, which takes the bond and angle
+# vibrations out of the swap statistic and about halves the ladder that tempering the whole
+# potential would need. thin is the tau in scans measured by a calibration run.
 #
-# thin is the MEASURED tau in scans. WARNING: tau_scans is not comparable across different thins --
-# a fat tail means thinning does not divide tau by the thinning factor, and Ace-A-Nme reads 82 at
-# thin 64 against 17 at thin 8. Compare only at equal thin, and let the audit iterate.
+# WARNING: tau in scans is comparable only at equal thin, because thinning a fat-tailed
+# autocorrelation does not divide tau by the thinning factor. Let the audit iterate.
 #
-# beta_min 0.4 is NOT the cheapest hot end for the small peptides and is kept for insurance. Held at
-# thin 32 on Ace-A-Nme, tau is flat across beta_min (49.0, 48.6, 45.8, 53.1 scans for 0.55, 0.4,
-# 0.3, 0.2) while the round trip more than doubles -- so the ladder is not what decorrelates this
-# peptide, the local MD is, and beta_min 0.55 is 1.5x cheaper. It also leaves a two-rung ladder,
-# which carries no insurance against a discrete mode the observables do not see.
+# beta_min 0.4 is insurance against a discrete mode the observables do not see. On these peptides
+# the local MD is what decorrelates the structure, so tau does not depend on beta_min.
 #
 # n_rounds is set from the cost of one round trip, n_rungs * (2 + 2 Lambda) scans, so that the
-# collection round carries several per replica rather than none -- the arithmetic that a bare
-# "zero round trips" hides. n_replicas is then chosen to put n_rungs * n_replicas near where the
-# force field's throughput saturates (~3000 configurations for the small systems, measured),
-# because the total work for a given number of independent structures does not depend on how it
-# is split between replicas and rounds but the throughput does.
+# collection round carries several per replica. n_replicas puts n_rungs * n_replicas near where
+# the force field's throughput saturates (~3000 configurations for the small systems): the total
+# work for a given number of independent structures does not depend on how it is split between
+# replicas and rounds, and the throughput does.
 SETTINGS = {
     'Ace-A-Nme': {'n_rungs': 6, 'beta_min': 0.4, 'n_replicas': 512, 'n_rounds': 12, 'thin': 96,
                   'md_steps': 100},
@@ -95,22 +89,19 @@ target = Peptide(sequence=args.sequence).to(device)
 print('%s: %d atoms, %d rungs, %d replicas, %d fs per scan'
       % (target.name, target.n_atoms, args.n_rungs, args.n_replicas, args.md_steps))
 
-# The path. SOLUTE tempering scales the torsions, the nonbonded terms and the Born solvation and
+# The path. Solute tempering scales the torsions, the nonbonded terms and the Born solvation and
 # leaves the bonds and angles at full strength, so the swap statistic is V = -E_soft / kT. Those
-# stiff terms are the larger half of Var(E) and none of the conformational barriers, so tempering
-# the whole potential spends a chunk of the ladder heating up bond vibrations for nothing. The
-# conformational enhancement is unchanged: beta multiplies exactly the terms that make the
-# barriers. Wang, Friesner and Berne 2011 for the idea, Kamiya and Sugita 2018 for doing it term
-# by term.
+# stiff terms are the larger half of Var(E) and none of the conformational barriers, and beta
+# multiplies exactly the terms that make the barriers. Wang, Friesner and Berne 2011 for the idea,
+# Kamiya and Sugita 2018 for doing it term by term.
 reference = None if args.tempering == 'global' \
     else PotentialReference(functools.partial(harmonic_log_prob, target),
                             functools.partial(harmonic_score, target))
 beta = linear_schedule(args.n_rungs, args.beta_min, dtype=target.dtype, device=device)
 
 # --freeze reuses a calibration's converged schedule and adapts nothing, which replaces the
-# doubling's permanent 2x with a burn-in of a few autocorrelation times. The step size was never
-# adapted here anyway -- the move is unadjusted, so the timestep is a bias and not a rejection rate
-# -- so the schedule is the whole of what carries over.
+# discarded doubling rounds with a burn-in of a few autocorrelation times. The move is unadjusted,
+# so the step size is never adapted and the schedule is all that carries over.
 if args.freeze:
     measured = json.loads((cache_dir() / 'plan' / (target.name + '_plan.json')).read_text())
     beta = torch.tensor(measured['final_beta'], dtype=target.dtype, device=device)
@@ -119,27 +110,19 @@ if args.freeze:
 print('%s tempering, beta %.3f .. 1.0 (%.0f K effective on the tempered terms)'
       % (args.tempering, args.beta_min, target.temperature / args.beta_min))
 
-# Tempering is over the POTENTIAL, not the thermostat: the local kernel integrates the annealed
-# potential at the target's own kT, which is the same annealed density and lets one BAOAB call
-# serve every rung. It is also why a swap needs no velocity rescaling -- every rung is Maxwell at
-# the same kT -- which is what makes carrying the velocities across scans correct.
-#
-# HMC is not usable here and that was measured: parallel_tempering's kernel has unit masses on
-# Cartesian coordinates, so on a ten-residue peptide its step size adapted down to 1.1e-5 and the
-# cold level's radius of gyration was 1.0270 +- 0.0006 at the first sweep and 1.0272 +- 0.0007 six
-# hundred sweeps later. A BAOAB integrator with the real masses and a 1 fs step has no such problem.
+# Tempering is over the potential and the thermostat stays at the target's own kT, so one BAOAB
+# call serves every level and a swap needs no velocity rescaling, every level being Maxwell at the
+# same kT. The local kernel is BAOAB with the real masses and a 1 fs step: HMC's unit masses on
+# Cartesian coordinates would tie its step size to the fastest bond vibration
 torch.manual_seed(args.seed)
-x0 = minimised_positions(target).to(device).reshape(1, -1)
+x0 = target.minimised_positions().to(device).reshape(1, -1)
 x0 = x0.expand(args.n_rungs * args.n_replicas, target.dim).contiguous()
 print('start E/kT %.3f' % target.energy(x0[:1]), flush=True)
 
-# Equilibrate every replica at its OWN rung's annealed potential before the rounds begin. Without
-# it the first rounds -- which are two, four and eight scans long -- estimate the barrier off the
-# descent from the minimised structure rather than off the ensemble, and hand the run a schedule
-# it then spends the rest of the run recovering from. It does not have to be long, because rounds
-# 1 to n_rounds - 1 are themselves burn-in and are half the total work; it only has to be long
-# enough that round 1's barrier is measured on an ensemble. Its cost is
-# equilibrate_ps * n_rungs * n_replicas / step_size configurations.
+# Equilibrate every replica at its own level's annealed potential before the rounds begin, so the
+# first short rounds measure the barrier on the ensemble and not on the descent from the minimised
+# structure. The later adaptation rounds are burn-in too, so this only has to be long enough for
+# round 1. Its cost is equilibrate_ps * n_rungs * n_replicas / step_size configurations.
 beta_row = beta.repeat_interleave(args.n_replicas)[:, None]
 if reference is None:
     def annealed_score(z):
@@ -158,10 +141,9 @@ print('equilibrated %.0f ps per replica in %.0f s, E/kT %.3f'
          target.energy(x0[-1]).mean()), flush=True)
 
 # Run: rounds of doubling length, the schedule re-tuned between them, every kept state drawn in
-# the final round where nothing is being adapted any more. The move is UNADJUSTED, so the timestep
-# is a bias and not a rejection rate and its acceptance is 1 by construction -- adaptation_gain
-# must therefore be 0, or the adaptation reads that as room to grow and raises the timestep until
-# the integrator is wrong.
+# the final round where nothing adapts. The move is unadjusted and its acceptance is 1 by
+# construction, so adaptation_gain is 0: the adaptation would read that acceptance as room to grow
+# and raise the timestep until the integrator is wrong.
 dynamics = functools.partial(run_batched_dynamics, target, step_size=args.step_size)
 start = time.time()
 samples, diagnostics = non_reversible_parallel_tempering(
@@ -189,10 +171,9 @@ round_trips = diagnostics['round_trips']
 print('round trips per replica (final round): mean %.1f  min %.0f'
       % (float(round_trips.mean()), float(round_trips.min())))
 
-# A round trip is not free even when the ladder is perfect: one machine has to walk 2 (n_rungs - 1)
-# rungs at best, and n_rungs (2 + 2 Lambda) scans in practice. Reporting the observed cost against
-# both is what separates a badly configured run from a run that is merely too short, which a bare
-# count of zero does not
+# One machine's round trip walks 2 (n_rungs - 1) levels at best and takes n_rungs (2 + 2 Lambda)
+# scans in practice. The observed cost against both tells a badly configured run from one that is
+# too short
 print('one machine round trip: %.0f scans observed, %.0f ideal, %.0f ballistic floor'
       % (diagnostics['scans_per_round_trip'], diagnostics['ideal_scans_per_round_trip'],
          diagnostics['ballistic_scans_per_round_trip']))
@@ -227,9 +208,8 @@ for column in range(min(4, torsions.shape[-1])):
 ess = effective_sample_size(observables)
 
 # The spread of the per-chain means against what independence predicts. It needs no lag window,
-# so it disagrees with the autocorrelation function exactly where the ACF is weakest: a lag window
-# that is too short reads tau LOW, and a few chains stuck at their own mean read tau HIGH. On
-# LJ-55 the two disagreed by a factor of sixty and this one was right.
+# so it disagrees with the autocorrelation function where the ACF is weakest: a lag window that is
+# too short reads tau low, and a few chains stuck at their own mean read tau high
 dispersion = chain_mean_dispersion(observables)
 print('\nworst tau %.2f stored states, on %s' % (ess['tau'], ess['name']))
 print('between-chain check: tau %.2f on %s (1 is independent)'
@@ -243,12 +223,11 @@ assert args.calibrate or ess['efficiency'] > 0.5, (
 energy = target.energy(flat)
 print('energy E/kT %.3f +- %.3f' % (energy.mean(), energy.std()))
 
-# Half against half along the SCAN axis, which is the cheapest test that the collection round is
-# stationary rather than still relaxing away from the minimised structure. It is worth having
-# because the failure is invisible in every other number here: a run can equalise its rejections,
-# make its round trips and report tau ~ 1 while its whole ensemble sits in the basin it started in.
-# The threshold is on the standard error of the difference, using the measured tau, so it tightens
-# as the run gets longer rather than being a fixed tolerance.
+# Half against half along the scan axis, the cheapest test that the collection round is stationary
+# and no longer relaxing away from the minimised structure. No other number here sees that failure:
+# a run can equalise its rejections, make its round trips and report tau ~ 1 while its whole
+# ensemble sits in the basin it started in. The threshold is on the standard error of the
+# difference, using the measured tau, so it tightens as the run gets longer.
 by_scan = energy.reshape(n_keep, args.n_replicas)
 first, second = by_scan[:n_keep // 2], by_scan[n_keep // 2:]
 drift = float(second.mean() - first.mean())
@@ -260,10 +239,10 @@ assert args.calibrate or abs(drift) < 5.0 * standard_error, (
     'standard errors: the run is still equilibrating, so raise --equilibrate_ps or --n_rounds'
     % (drift, abs(drift) / max(standard_error, 1e-12)))
 
-# A calibration run measures and does not produce. It skips the acceptance checks above -- the
-# whole point is that its thin is wrong -- writes no reference set, and leaves a plan file that
-# --freeze reads back and the production shards are sized from. Its throughput is recorded too,
-# because that is a property of the GPU it landed on and not of this machine.
+# A calibration run measures and writes no reference set. It skips the round-trip, efficiency and
+# drift checks above, since its thin is what it measures, and leaves a plan file that --freeze reads
+# back and the production shards are sized from. Its throughput is recorded too, as a property of
+# the GPU it ran on.
 if args.calibrate:
     folder = cache_dir() / 'plan'
     folder.mkdir(parents=True, exist_ok=True)

@@ -210,21 +210,27 @@ def test_rdf_of_an_ideal_gas_is_one():
     assert abs(float(g[middle].mean()) - 1.0) < 0.05
 
 
-def test_train_split_is_the_displacement_only_chain():
-    """The literature-native biased split: no swap moves, far too few sweeps to equilibrate"""
-    class ShortKobAndersen(KobAndersen2D):
-        train_time_units = 5
-
-    target = ShortKobAndersen(temperature=0.32)
-    x = target.train_samples(n=8)
+def test_the_train_recipe_runs_displacements_from_a_few_basins():
+    """Basins made from shuffled offset rows, then displacements at a ladder of temperatures"""
+    target = KobAndersen2D(temperature=0.32)
+    knobs = {'n_chains': 4, 'n_basins': 2, 'basin_time_units': 3, 'n_time_units': 3, 'thin': 1}
+    x = target.generate_train_samples(8, **knobs)
     assert x.shape == (8, target.dim)
-    assert torch.equal(x, target.train_samples(n=8))
+    assert torch.equal(x, target.generate_train_samples(8, **knobs))
     assert torch.isfinite(target.energy(x)).all()
 
-    # The recipe tag and the chain length ride on top of the density spec, so two budgets cannot
-    # collide and a reader can see which recipe a cached file came from without opening it
-    assert target.train_cache_key(8).endswith('_displacement-local-v1_t5')
-    assert target.train_cache_key(8) != KobAndersen2D(temperature=0.32).train_cache_key(8)
+    # Every configuration starts from its own assignment of the particles to the sites
+    start = target.lattice_configuration(2, offset=True, shuffle=True, generator=generator(0))
+    assert not torch.equal(start[0], start[1])
+
+    # And every second row of sites is shifted by half a spacing
+    rows = torch.unique(start[0][:, 0])
+    shifted = start[0][start[0][:, 0] == rows[1], 1] % (target.box / 7)
+    assert torch.allclose(shifted, torch.full_like(shifted, 0.5 * target.box / 7), atol=1e-5)
+
+    # The recipe tag rides on top of the density spec, so a changed recipe is a cache miss
+    assert target.train_recipe in target.train_cache_key(8)
+    assert target.train_cache_key(8) != KobAndersenBinary().train_cache_key(8)
 
 
 def test_local_energy_sums_to_the_total_energy():

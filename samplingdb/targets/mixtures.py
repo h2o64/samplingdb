@@ -4,7 +4,7 @@
 import math
 import torch
 from ..metrics.weights import normalize_weights
-from .kernels import random_walk_mh, student_t2
+from .kernels import student_t2
 from .base import ExactTarget, generator
 from .modes import ModeCoverage
 
@@ -25,7 +25,7 @@ def log_prob_gaussian(x, mean, variance):
     return log_prob - 0.5 * torch.log(variance).sum(dim=-1)
 
 
-def uniform_means(n_modes, dim, low, high, seed):
+def uniform_means(n_modes, dim, low, high, seed, min_distance=0.0):
     """Draws mixture locations uniformly in [low, high]^dim from a seeded torch generator
 
     The draw is made on the CPU and in float32 whatever the working dtype, so a float64 build holds
@@ -33,24 +33,38 @@ def uniform_means(n_modes, dim, low, high, seed):
     seed, is the specification: tests/test_target_specs.py pins its sha256, so a change in torch's
     generator would fail there rather than move the density.
 
+    NOTE: the candidates are kept in their order of draw, skipping any closer than min_distance to
+    one already kept, so wherever the first n_modes candidates are far enough apart the locations
+    are those of a plain draw.
+
     Args:
         * n_modes (int): Number of components
         * dim (int): Dimension
         * low (float): Lower end of every coordinate
         * high (float): Upper end of every coordinate
         * seed (int): Seed of the draw
+        * min_distance (float): Smallest distance between two locations (default is 0.0)
 
     Returns:
         * means (torch.Tensor of shape (n_modes, dim)): Locations, in float32
     """
-    u = torch.rand((n_modes, dim), generator=generator(seed), dtype=torch.float32)
-    return low + (high - low) * u
+    u = torch.rand((100 * n_modes, dim), generator=generator(seed), dtype=torch.float32)
+    candidates = low + (high - low) * u
+
+    # Keep the candidates in order, skipping those too close to one already kept
+    means = candidates[:1]
+    for candidate in candidates[1:]:
+        if len(means) == n_modes:
+            break
+        if float(torch.linalg.norm(means - candidate, dim=-1).min()) >= min_distance:
+            means = torch.cat([means, candidate[None]])
+    assert len(means) == n_modes
+    return means
 
 
-# Every class here is a Tier 0 exact-draw toy in two dimensions: there is no sampler to speed up,
-# so float32 would buy nothing and would cost the exactness checks that pin their specifications --
-# unit isotropic components, modes on a circle with equal weights. float64 by decision, not by
-# omission. The periodic pair mixtures that DO have a sampler live in physics.py and are float32.
+# Every class here is a Tier 0 exact-draw toy and works in float64, which the exactness checks that
+# pin their specifications need. The periodic pair mixtures, which have a sampler, live in
+# physics.py and are float32
 class Mixture(ModeCoverage, ExactTarget):
     """Base class for the isotropic-component location mixtures
 
@@ -185,11 +199,8 @@ class Mixture(ModeCoverage, ExactTarget):
         whatever the overlap between components, so an exact draw scores no floor on
         tv_weights beyond its sampling noise.
 
-        NOTE: counting argmax labels instead measures the mass of the region where each component
-        dominates. Where components overlap that mass is not w_k, and exact draws then read a floor
-        that does not shrink with n. On MoS over four seeds, argmax labels give tv_weights 0.037
-        to 0.044 at n = 10^5 and 0.037 to 0.039 at 4 x 10^5; the mean responsibilities give 0.002
-        to 0.007 and 0.002 to 0.003, shrinking as sampling noise does.
+        NOTE: counts of mode_labels measure the mass of the region where each component dominates,
+        which is not w_k where components overlap, so they differ from these weights.
 
         Args:
             * samples (torch.Tensor of shape (n, dim)): Samples
@@ -204,45 +215,14 @@ class Mixture(ModeCoverage, ExactTarget):
         probs = self.chunked(self.responsibilities, x, cost=self.n_modes * self.dim)
         return (mass @ probs)[None]
 
-    def generate_train_samples(self, n):
-        """Runs the one-chain-per-mode random-walk recipe
-
-        Chains are spread evenly over the components, each starting at its own component's mean,
-        and take 200 Metropolis steps of size 2.4 * min_scale / sqrt(dim) -- the optimal
-        random-walk scaling for the narrowest component. Every mode is therefore VISITED, with the
-        correct local shape, and none is missed. What is wrong is the PROPORTIONS: the chains are
-        allocated by index rather than by weight, so a mode carrying 1% of the mass gets the same
-        share of the samples as one carrying 50%, and no chain lives long enough to cross a gap and
-        correct that. On TwoModes at n = 2048 that is a 50/50 split against a true 2/3 : 1/3, i.e.
-        tv_weights 0.33 where an exact draw of the same size reads 0.006.
-
-        WARNING: for a mixture whose weights are EQUAL, allocating chains per mode is not an error
-        -- it is stratified sampling, and its mode weights come out right by construction. GMM-40
-        and MoS are in that case: at n = 2048 the train split reads tv_weights 0.057 on GMM-40 and
-        0.021 on MoS, against 0.117 and 0.042 for an exact draw of the same size. Their train split
-        is biased only in that it contains no mode-to-mode dynamics whatsoever, every chain having
-        stayed where it started. Read those two as cheap local data, not as a mode-proportion
-        stress test; the unequal-weight mixtures (TwoModes, BracketTwoModes, ManyModes) are the
-        stress test.
-
-        Args:
-            * n (int): Number of samples, one per chain
-
-        Returns:
-            * x (torch.Tensor of shape (n, dim)): The biased samples
-        """
-        gen = generator(0)
-        component = torch.arange(n) % self.n_modes
-        x0 = self.means.cpu()[component].clone()
-        step_size = 2.4 * self.min_scale / math.sqrt(self.dim)
-        return random_walk_mh(self.log_prob, x0, n_steps=200, step_size=step_size,
-                              proposal=self.train_proposal, generator=gen)
+    @property
+    def train_step_size(self):
+        """Returns 2.4 min_scale / sqrt(dim), the optimal random-walk scale of the narrowest mode"""
+        return 2.4 * self.min_scale / math.sqrt(self.dim)
 
 
 class MOG(Mixture):
     """A mixture of Gaussians with diagonal covariances"""
-
-    train_proposal = 'normal'
 
     def __init__(self, weights, means, variances, name='mog', prior_scale=None,
                  dtype=torch.float64):
@@ -277,6 +257,12 @@ class MOG(Mixture):
         """Evaluates the per-component scores, -(x - mu_k) / var_k"""
         return -(x[:, None, :] - self.means) / self.variances
 
+    def sample_modes(self, modes, generator=None):
+        """Draws one exact sample from each given component, on the device of modes"""
+        noise = torch.randn(len(modes), self.dim, generator=generator, dtype=self.dtype,
+                            device=modes.device)
+        return self.means[modes] + torch.sqrt(self.variances[modes]) * noise
+
     def sample(self, sample_shape, generator=None):
         """Draws exact samples of shape sample_shape
 
@@ -303,9 +289,8 @@ class GMM40(MOG):
     than a density-estimation test.
 
     WARNING: the means are drawn uniformly in [-40, 40]^dim by uniform_means with seed 0, in
-    torch. The two papers drew theirs with JAX's threefry, whose output changed across JAX
-    versions, so no matrix reproduces theirs; numbers transfer through the construction, not
-    through the exact locations.
+    torch, so they are not the locations of the two papers, which were drawn with JAX. Numbers
+    transfer through the construction, not through the exact locations.
     """
 
     def __init__(self, dim=2, scale=1.0, means=None, prior_scale=40.0, dtype=torch.float64):
@@ -334,11 +319,13 @@ class MoS(Mixture):
     WARNING: df = 2 means the variance is infinite. W2 and RBF-MMD are heavy-tailed here and
     need many samples; that is the point of the target.
 
-    NOTE: the means are drawn uniformly in [-10, 10]^dim by uniform_means with seed 0, in torch;
-    see GMM40 on why they are not the paper's.
+    NOTE: the means are drawn uniformly in [-10, 10]^dim by uniform_means with seed 0, in torch,
+    no two closer than MIN_DISTANCE scales, so that the heavy tails do not merge two modes into
+    one; see GMM40 on why they are not the paper's.
     """
 
-    train_proposal = 'student_t2'
+    # Smallest distance between two means, in units of the component scale
+    MIN_DISTANCE = 5.0
 
     def __init__(self, dim=2, df=2.0, scale=1.0, means=None, prior_scale=10.0,
                  dtype=torch.float64):
@@ -354,7 +341,8 @@ class MoS(Mixture):
             * dtype (torch.dtype): Working dtype (default is torch.float64)
         """
         if means is None:
-            means = uniform_means(10, dim, -10.0, 10.0, seed=0)
+            means = uniform_means(10, dim, -10.0, 10.0, seed=0,
+                                  min_distance=self.MIN_DISTANCE * scale)
         means = means.to(torch.float64)
         weights = torch.ones(len(means), dtype=torch.float64)
         super().__init__(means.shape[-1], 'mos', weights, means, dtype=dtype)
@@ -362,6 +350,15 @@ class MoS(Mixture):
         self.scale = scale
         self.min_scale = scale
         self.prior_scale = prior_scale
+
+    @property
+    def train_step_size(self):
+        """Returns half the component scale
+
+        The df = 2 tails reach from one component to the next, so a random walk at the optimal
+        scale would cross between them within the recipe's steps and undo its allocation.
+        """
+        return 0.5 * self.scale
 
     def spec(self):
         """Adds the degrees of freedom and the component scale"""
@@ -384,6 +381,20 @@ class MoS(Mixture):
         """Evaluates the per-component scores, -(df + 1) (x - mu_k) / (df scale^2 + (x - mu_k)^2)"""
         delta = x[:, None, :] - self.means
         return -(self.df + 1) * delta / (self.df * self.scale ** 2 + delta ** 2)
+
+    def sample_modes(self, modes, generator=None):
+        """Draws one exact sample from each given component, on the device of modes
+
+        A Student-t with df degrees of freedom is a standard normal over the root of an
+        independent chi-square divided by df, and for an integer df that chi-square is a sum of df
+        squared normals, so the draw respects generator at any integer df.
+        """
+        assert float(self.df).is_integer()
+        shape = (len(modes), self.dim)
+        normal = torch.randn(shape, generator=generator, dtype=self.dtype, device=modes.device)
+        squares = torch.randn(shape + (int(self.df),), generator=generator, dtype=self.dtype,
+                              device=modes.device) ** 2
+        return self.means[modes] + self.scale * normal / torch.sqrt(squares.sum(-1) / self.df)
 
     def sample(self, sample_shape, generator=None):
         """Draws exact samples of shape sample_shape

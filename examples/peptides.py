@@ -1,4 +1,4 @@
-# Score the biased MD split of a peptide against its replica-exchange reference set
+# Score the biased basin MD split of a peptide against its replica-exchange reference set
 
 # Libraries
 import torch
@@ -17,12 +17,16 @@ for sequence in PEPTIDE_SYSTEMS:
     print('%-12s %-38s %5d %6.1f %8d' % (sequence, target.name, target.n_atoms,
                                          target.temperature, len(target.torsion_indexes)))
 
-# Take alanine dipeptide, whose reference set is the cheapest to pull
-target = targets['Ace-A-Nme']
+# Take alanine dipeptide, whose reference set is the cheapest to pull, on a GPU if there is one
+target = targets['Ace-A-Nme'].to('cuda' if torch.cuda.is_available() else 'cpu')
 reference = target.test_samples(n=8000)
-train = target.train_samples(n=500)
+
+# The train recipe starts Langevin trajectories from every backbone basin, alpha-L the most often,
+# at a ladder of temperatures around 300 K. train_samples() runs 1000 of them, seconds on a GPU
+# once compiled; 100 keep this script short on a CPU
+train = target.generate_train_samples(2000, n_chains=100)
 print('\n%-16s %-24s %s' % ('split', 'E/kT', 'phi > 0'))
-for name, samples in [('test', reference), ('100 ps MD train', train)]:
+for name, samples in [('test', reference), ('basin train', train)]:
     energy = target.energy(samples).detach()
     phi = target.torsions(samples)[:, 0]
     print('%-16s %8.2f +- %5.2f        %.4f' % (name, energy.mean(), energy.std(),
@@ -45,8 +49,6 @@ print('\nramachandran grid', tuple(joint['hist'].shape),
                                                   int((joint['ref_hist'] > 0).sum())))
 
 # The transferable-samplers panel, on whichever device the target is on
-target = target.to('cuda' if torch.cuda.is_available() else 'cpu')
-reference, train = reference.to(target.device), train.to(target.device)
 floor = target.compute_upstream_metrics(reference[:4000], reference[4000:])
 biased, upstream = target.compute_upstream_metrics(train, reference[:4000], return_hist=True)
 print('\n%-24s %10s %10s   (on %s)' % ('upstream metric', 'test/test', 'train/test',

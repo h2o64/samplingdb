@@ -1,19 +1,12 @@
-# Molecular-dynamics pieces of the peptide generator: the batched integrator and the solute split
+# Molecular-dynamics pieces of the peptide generator: the integrator wrapper and the solute split
 
 # Libraries
-import math
 import torch
+from samplingdb.targets.kernels import langevin
 from samplingdb.targets.molecular import center
 
 # The harmonic term of each peptide, compiled once when the peptide's own potential is
 COMPILED = {}
-
-
-def masses(target):
-    """Returns the particle masses of a peptide in amu, which only the integrator needs"""
-    return torch.as_tensor([target.system.getParticleMass(index)._value
-                            for index in range(target.n_atoms)], dtype=target.dtype,
-                           device=target.device)
 
 
 def harmonic_log_prob(target, x):
@@ -47,49 +40,17 @@ def harmonic_score(target, x):
     return gradient
 
 
-def minimised_positions(target, x0=None):
-    """Returns the energy-minimised structure, which is where a trajectory has to start
-
-    WARNING: target.reference_positions is the shipped pdb verbatim, and a pdb is not a minimum of
-    this force field. On a ten-residue peptide it sat at E/kT = 9.0e5 against an ensemble at
-    -453 +- 12, and run_batched_dynamics from there does NOT raise -- linlogcut turns the energy
-    above energy_cut into a logarithm, so the molecule flies apart to |x| ~ 2.6e4 nm inside 200 fs
-    while every number stays finite and the run writes a full file of it. This is the minimisation OpenMM's
-    Simulation runs before its own dynamics.
-
-    Args:
-        * target (Peptide): The peptide
-        * x0 (numpy.ndarray of shape (n_atoms, 3) or None): Starting positions in nanometres;
-            None uses reference_positions (default is None)
-
-    Returns:
-        * x (torch.Tensor of shape (dim,)): The minimised structure, in nanometres
-    """
-    import openmm
-
-    if x0 is None:
-        x0 = target.reference_positions
-    simulation = openmm.app.Simulation(target.topology, target.system,
-                                       openmm.VerletIntegrator(0.001),
-                                       openmm.Platform.getPlatformByName('Reference'))
-    simulation.context.setPositions(x0)
-    simulation.minimizeEnergy()
-    state = simulation.context.getState(getPositions=True)
-    positions = state.getPositions(asNumpy=True)._value.reshape(-1)
-    return torch.as_tensor(positions, dtype=target.dtype, device=target.device)
-
-
 def run_batched_dynamics(target, x0, n_steps, save_interval=None, step_size=0.001,
                          generator=None, return_velocities=False, score=None, velocities=None):
     """Runs Langevin dynamics on a whole batch of replicas at once, in torch
 
-    The integrator is BAOAB -- position update, Ornstein-Uhlenbeck velocity update, position
-    update, both halves of the force kick around them -- which is what OpenMM's
-    LangevinMiddleIntegrator is, so this samples the same law at the same friction and timestep.
-    The difference is that a batch of replicas advances in one set of
+    The integrator is samplingdb.targets.kernels.langevin, BAOAB -- position update,
+    Ornstein-Uhlenbeck velocity update, position update, both halves of the force kick around them
+    -- which is what OpenMM's LangevinMiddleIntegrator is, so this samples the same law at the same
+    friction and timestep. The difference is that a batch of replicas advances in one set of
     tensor operations instead of one Context per replica, which is what makes generating a
-    reference ensemble affordable: on Ace-A-Nme the force field does ~4.7e5 configurations per
-    second compiled, so 1024 replicas advance at ~0.46 ps of their own time per second.
+    reference ensemble affordable. This wrapper adds the peptide's own masses, friction and
+    temperature, and centres the frames.
 
     Units are OpenMM's, in which a force in kJ/mol/nm divided by a mass in amu is directly an
     acceleration in nm/ps^2: positions nm, velocities nm/ps, masses amu, friction 1/ps,
@@ -132,31 +93,15 @@ def run_batched_dynamics(target, x0, n_steps, save_interval=None, step_size=0.00
             * velocities (torch.Tensor of shape (n_replicas, dim)): Final velocities
     """
     score = target.score if score is None else score
-    mass = masses(target).to(x0).repeat_interleave(3)
-    thermal = torch.sqrt(target.kT / mass)
-    friction = math.exp(-target.friction * step_size)
-    noise_scale = math.sqrt(1.0 - friction ** 2)
-
-    def draw(shape):
-        values = torch.randn(shape, generator=generator, dtype=target.dtype)
-        return values.to(x0.device)
-
-    x = x0.clone()
-    velocity = thermal * draw(x.shape) if velocities is None else velocities.clone()
-    force = target.kT * score(x).detach()
-    frames = []
-
-    for step in range(n_steps):
-        velocity = velocity + 0.5 * step_size * force / mass
-        x = x + 0.5 * step_size * velocity
-        velocity = friction * velocity + noise_scale * thermal * draw(x.shape)
-        x = x + 0.5 * step_size * velocity
-        force = target.kT * score(x).detach()
-        velocity = velocity + 0.5 * step_size * force / mass
-        if save_interval is not None and (step + 1) % save_interval == 0:
-            frames.append(center(x, target.n_atoms))
-
-    out = torch.stack(frames) if save_interval is not None else center(x, target.n_atoms)
+    mass = target.masses.to(x0).repeat_interleave(3)
+    force = lambda x: target.kT * score(x).detach()
+    out = langevin(force, x0, n_steps, step_size, mass, target.kT, target.friction,
+                   generator=generator, return_trace=save_interval is not None,
+                   thin=save_interval or 1, velocities=velocities,
+                   return_velocities=return_velocities)
+    if return_velocities:
+        out, velocity = out
+    out = center(out.reshape(-1, target.dim), target.n_atoms).reshape(out.shape)
     if return_velocities:
         return out, velocity
     return out

@@ -255,16 +255,17 @@ def test_the_working_dtype_does_not_change_the_reference_set(name):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason='no GPU')
 @pytest.mark.parametrize('name', catalogued(data=False))
 def test_a_train_split_builds_on_a_gpu_target(name, monkeypatch, tmp_path):
-    """The recipe runs on the CPU whatever the target's device, so both build the same split"""
+    """The recipe runs where the target lives, and a GPU split is cached apart from a CPU one"""
     built = target(name, **uncompiled(name))
-    monkeypatch.setenv('SAMPLINGDB_CACHE', str(tmp_path / 'cpu'))
-    expected = built.train_samples(n=4)
+    monkeypatch.setenv('SAMPLINGDB_CACHE', str(tmp_path))
+    cpu_key = built.train_cache_key(4)
 
-    monkeypatch.setenv('SAMPLINGDB_CACHE', str(tmp_path / 'gpu'))
     on_gpu = built.to('cuda')
     x = on_gpu.train_samples(n=4)
     assert x.device.type == 'cuda' and on_gpu.device.type == 'cuda'
-    assert torch.equal(x.cpu(), expected)
+    assert x.shape == (4, built.dim)
+    assert torch.isfinite(on_gpu.log_prob(x)).all()
+    assert on_gpu.train_cache_key(4) != cpu_key
 
 
 VARIANTS = [

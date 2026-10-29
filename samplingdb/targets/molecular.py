@@ -15,12 +15,13 @@ from ..metrics.wasserstein import (
     wasserstein_distance_1d,
 )
 from ..metrics.weights import normalize_weights, subsample
-from .base import Target
+from .base import Target, chain_layout, cycle, generator, interleave
 from .forcefield import GAS_CONSTANT, TorchForceField
+from .kernels import langevin, steepest_descent, temperature_ladder
 
-# Hugging Face dataset holding the Sequential Boltzmann Generators trajectories, MIT, read at a pinned
-# commit with every file checked against its sha256: the PDB defines the density (topology and atom
-# order), and the test split is what the TICA projection is fitted on
+# Hugging Face dataset holding the Sequential Boltzmann Generators trajectories, MIT, read at a
+# pinned commit with every file checked against its sha256: the PDB defines the density (topology
+# and atom order), and the test split is what the TICA projection is fitted on
 SBG_REPO = 'transferable-samplers/sequential-boltzmann-generators-data'
 SBG_REVISION = '61037092c603e47010988a02f281843ead2d3536'
 SBG_CHECKSUMS = {
@@ -144,12 +145,12 @@ class Peptide(Target):
     carries the sequence and the temperature for exactly that reason. Only the AAA / AAAAAA pair
     forms a chain-length ladder at fixed spec.
 
-    WARNING: the potential is exactly inversion-symmetric (no term distinguishes a structure from its
-    mirror image), so the D enantiomer of every structure carries the same weight as the L one, and
-    the reference sets hold only the L enantiomer, which is what molecular dynamics from an L start
-    reaches. compute_metrics therefore maps every sample whose chirality differs from the
-    reference's onto its mirror image before scoring, as transferable-samplers does, and reports the
-    two rates.
+    WARNING: the potential is exactly inversion-symmetric (no term distinguishes a structure from
+    its mirror image), so the D enantiomer of every structure carries the same weight as the L
+    one, and the reference sets hold only the L enantiomer, which is what molecular dynamics from
+    an L start reaches. compute_metrics therefore maps every sample whose chirality differs from
+    the reference's onto its mirror image before scoring, as transferable-samplers does, and
+    reports the two rates.
 
     NOTE: the energy is differentiable whenever x requires grad. The SCORE can be too, so a loss
     may be built on it, at the cost of a retained backward graph; it is off until
@@ -164,6 +165,20 @@ class Peptide(Target):
     truth_tier = 3
     reference_folder = 'md'
     prior_scale = 0.05
+    train_recipe = 'basin-md'
+
+    # Backbone basins the train recipe places every residue in, as (phi, psi) centres in degrees --
+    # beta/PII, alpha-R, alpha-L -- and their shares, geometric from 1 to 10 against their usual
+    # order of weight, so that alpha-L, the lightest, gets the most. Klein et al. 2023 bias their
+    # alanine dipeptide training set towards the same positive-phi basin
+    train_basins = ((-75.0, 150.0), (-70.0, -25.0), (55.0, 35.0))
+    train_basin_shares = (1.0, 10 ** 0.5, 10.0)
+
+    # Temperature factors of the train trajectories, lowest and highest. Bonds and angles carry the
+    # whole spread of the energy and relax within a picosecond, so the spread is what carries the
+    # train energies past both ends of the test ones. The low end sits further from 1 because
+    # alpha-L, which the basins overrepresent, is the highest basin
+    train_temperatures = (0.6, 1.25)
 
     # The two linlogcut constants, in kT. They are part of the specification: energies above
     # ENERGY_CUT are softened logarithmically, so an atomic overlap gives a large finite number
@@ -210,8 +225,11 @@ class Peptide(Target):
         name = sequence.lower() + '-T' + str(int(system['temperature']))
         super().__init__(3 * n_atoms, name, temperature=system['temperature'], dtype=dtype)
 
-        # 3. The force field that evaluates energies and forces
+        # 3. The force field that evaluates energies and forces, and the masses the dynamics of
+        # the train recipe need, in amu
         self.n_atoms = n_atoms
+        self.register_buffer('masses', torch.as_tensor(
+            [self.system.getParticleMass(index)._value for index in range(n_atoms)], dtype=dtype))
         self.kT = GAS_CONSTANT * self.temperature
         self.bridge = TorchForceField(self.system, self.temperature, energy_cut=self.ENERGY_CUT,
                                       energy_max=self.ENERGY_MAX, chunk_size=chunk_size,
@@ -220,6 +238,7 @@ class Peptide(Target):
 
         # 4. The torsions, TICA features and chirality centres the metric panel reads
         self.register_buffer('torsion_indexes', self.build_torsion_indexes())
+        self.register_buffer('torsion_sides', self.build_torsion_sides())
         self.build_tica_geometry()
         self.register_buffer('chirality_centres', self.build_chirality_centres())
         rows, cols = torch.triu_indices(n_atoms, n_atoms, offset=1)
@@ -283,8 +302,35 @@ class Peptide(Target):
                  for residue in shared]
         self.register_buffer('ramachandran_pairs', torch.as_tensor(pairs, dtype=torch.int64))
         self.ramachandran_residues = shared
+        self.backbone_residues = phi_residues + psi_residues
         return torch.as_tensor(np.concatenate([phi_indexes, psi_indexes, omega_indexes]),
                                dtype=torch.int64)
+
+    def build_torsion_sides(self):
+        """Returns, per torsion, the atoms a rotation about its central bond carries
+
+        For a torsion (a, b, c, d) these are the atoms on c's side of the bond b-c, which for
+        phi, psi and omega alike is the C-terminal side, found by walking the bonds from c without
+        crossing b. A bond inside a ring has no side, which only a proline would bring.
+
+        Returns:
+            * sides (torch.Tensor of shape (n_torsions, n_atoms)): Boolean masks
+        """
+        neighbours = {atom.index: [] for atom in self.topology.atoms()}
+        for bond in self.topology.bonds():
+            neighbours[bond[0].index].append(bond[1].index)
+            neighbours[bond[1].index].append(bond[0].index)
+        sides = torch.zeros(len(self.torsion_indexes), self.n_atoms, dtype=torch.bool)
+        for k, (_, b, c, _) in enumerate(self.torsion_indexes.tolist()):
+            side, stack = {c}, [c]
+            while stack:
+                for atom in neighbours[stack.pop()]:
+                    if atom != b and atom not in side:
+                        side.add(atom)
+                        stack.append(atom)
+            assert b not in side
+            sides[k, list(side)] = True
+        return sides
 
     @property
     def torsion_names(self):
@@ -412,6 +458,36 @@ class Peptide(Target):
         """Evaluates the backbone torsions of each configuration, in radians"""
         return dihedral(self.positions(x), self.torsion_indexes)
 
+    def set_torsions(self, x, columns, angles):
+        """Rotates torsions to the given angles, carrying the atoms on the far side of each bond
+
+        A rotation about a torsion's central bond is rigid, so it keeps every bond length, bond
+        angle and chirality centre, and leaves every other torsion where it was.
+
+        Args:
+            * x (torch.Tensor of shape (n, dim)): Configurations
+            * columns (list of int): Torsions to set, as rows of torsion_indexes
+            * angles (torch.Tensor of shape (n, len(columns))): Their new values, in radians
+
+        Returns:
+            * x (torch.Tensor of shape (n, dim)): The rotated configurations
+        """
+        positions = self.positions(x).clone()
+        for k, column in enumerate(columns):
+            _, b, c, _ = self.torsion_indexes[column].tolist()
+            side = self.torsion_sides[column]
+            delta = angles[:, k] - dihedral(positions, self.torsion_indexes[column][None])[:, 0]
+
+            # Rodrigues' rotation of the side about the unit bond axis, around atom b
+            axis = positions[:, c] - positions[:, b]
+            axis = (axis / torch.linalg.norm(axis, dim=-1, keepdim=True))[:, None]
+            v = positions[:, side] - positions[:, b, None]
+            cos, sin = torch.cos(delta)[:, None, None], torch.sin(delta)[:, None, None]
+            v = v * cos + torch.cross(axis.expand_as(v), v, dim=-1) * sin \
+                + axis * (axis * v).sum(-1, keepdim=True) * (1 - cos)
+            positions[:, side] = positions[:, b, None] + v
+        return positions.reshape(len(x), -1)
+
     def load_split(self, split, n=None):
         """Reads one of the three released splits, centred
 
@@ -486,7 +562,7 @@ class Peptide(Target):
         TICA metrics are theirs. TICA is defined through a time-lagged covariance, so the frames
         have to be time-ordered: the released Ace-A-Nme train split, for one, is shuffled. The
         projection is cached; the cache name carries TICA_LAYOUT because a projection is only
-        meaningful for the exact feature ordering it was fitted on, and a reordering keeps the
+        valid for the exact feature ordering it was fitted on, and a reordering keeps the
         shape.
 
         Returns:
@@ -520,6 +596,12 @@ class Peptide(Target):
         and the two k-means Jensen-Shannon divergences, on TICA coordinates and on the
         sin/cos-wrapped dihedrals. Every feature is computed on device; only the transport linear
         programs and the one-off TICA fit leave it.
+
+        WARNING: tica_k_jsd barely sees the alpha-R / beta split, a blind spot inherited from
+        upstream. k-means runs on the raw TICA coordinates, as upstream runs it, and TIC 1 spreads
+        far wider than TIC 2, so the clusters are bands across TIC 1 while alpha-R and beta differ
+        along TIC 2: a sample missing alpha-R entirely barely moves it. Read the basin populations
+        off torus_k_jsd and the torsion panel.
 
         NOTE: exact optimal transport is O(n^2) in memory, so torus_w2, tica_w2 and tica_k_jsd run
         on max_ot_samples rows per side drawn by metrics.weights.subsample, the draw the standard
@@ -638,16 +720,15 @@ class Peptide(Target):
         2D Ramachandran joint. Torsion metrics come first and the energy ones second, because a
         handful of high-energy structures dominate the energy comparison while telling you little
         about the conformational ensemble. The Wasserstein distance is the circular one: omega sits
-        on the -pi / pi cut, where a linear W1 reads two halves of one ensemble ~10x apart.
+        on the -pi / pi cut, which a linear W1 treats as the two ends of its range.
 
-        WARNING: a histogram divergence is only a distance when the bins are populated, and the
-        corpus's 200 x 200 Ramachandran grid is 40 000 cells -- built for PLOTS, at which it is
-        the right convention. Scored on 500 samples it is 98% empty, and js_ramachandran then
-        reads ~0.61 for two halves of the SAME ensemble, indistinguishable from a genuinely
-        collapsed sampler. So the divergences default to a coarser grid (64 bins per marginal,
-        32 x 32 joint), the plot-grade 200 x 200 histograms are still what return_hist gives back,
-        and 'ramachandran_occupancy' reports the fraction of reference cells that carry any mass
-        at all -- read a divergence next to it, or prefer the binning-free w1_ entries.
+        WARNING: a histogram divergence is only a distance when the bins are populated. The
+        corpus's 200 x 200 Ramachandran grid, its plot convention, is 98% empty on 500 samples,
+        where js_ramachandran reads ~0.61 for two halves of one ensemble. The divergences
+        therefore default to 64 bins per marginal and a 32 x 32 joint, return_hist gives the
+        200 x 200 histograms back, and 'ramachandran_occupancy' reports the fraction of reference
+        cells that carry any mass: read a divergence next to it, or prefer the binning-free w1_
+        entries.
 
         Args:
             * samples (torch.Tensor of shape (batch_size, dim)): Samples to score
@@ -743,7 +824,7 @@ class Peptide(Target):
         del structure['energy_w1']
         metrics.update(structure)
 
-        # The upstream panel, which is what a peptide result is actually compared on
+        # The upstream panel, which a peptide result is compared on
         upstream, upstream_hist = self.compute_upstream_metrics(samples, ref_samples,
                                                                weights=weights, energy=energy,
                                                                ref_energy=ref_energy,
@@ -765,15 +846,11 @@ class Peptide(Target):
         """Returns this library's own replica-exchange ensemble
 
         Generated by gen/md/generate.py and published in this library's dataset repo, so the first
-        call downloads it (see data.fetch_reference) and later calls read the cache. It replaces the
-        released splits, which are not equilibrium reference sets at the sizes they advertise.
-        Measured on the observables the upstream panel is built from, their integrated
-        autocorrelation times are 4.3 stored frames for AAA, 17.7 for AAAAAA, 38.3 for Ace-A-Nme
-        and 60.7 for Ace-AAA-Nme, whose 580 000-frame test split is therefore worth about 9 600
-        independent structures.
+        call downloads it (see data.fetch_reference) and later calls read the cache.
 
-        load_split() reads the released files, on which the TICA projection is fitted; they are not
-        a reference set.
+        NOTE: load_split() reads the released files, on which the TICA projection is fitted. They
+        are correlated trajectories, worth far fewer independent structures than their frame
+        counts, and are not a reference set.
 
         Args:
             * n (int or None): Number of leading frames; None reads all (default is None)
@@ -798,51 +875,128 @@ class Peptide(Target):
                           + ' --min_samples <n>')
         return torch.as_tensor(array, dtype=self.dtype, device=self.device)
 
-    def generate_train_samples(self, n):
-        """Runs the short single-trajectory MD recipe
+    def minimised_positions(self, x0=None):
+        """Returns the energy-minimised structure, which is where a trajectory has to start
 
-        The pretraining protocol of Nam et al. 2025: 100 ps of Langevin dynamics at this system's
-        temperature from the energy-minimised released structure, with the released integrator's
-        friction and a 1 fs timestep.
-
-        NOTE: what this gets wrong is the basin POPULATIONS, not the basin coverage. 100 ps is long
-        enough for brief excursions between basins but nowhere near long enough for their relative
-        weights to mean anything, so the signal is in the marginals rather than in any claim that
-        some basin is empty.
-
-        NOTE: this is ONE trajectory, so n changes the stride between kept frames (100 000 steps
-        divided by n) and therefore the split itself, not just its size. The cache keys n
-        separately.
+        WARNING: reference_positions is the released pdb verbatim, which is not a minimum of this
+        force field. Dynamics started from it can blow the molecule apart without raising, because
+        linlogcut keeps every energy above energy_cut finite. This is the minimisation OpenMM's
+        Simulation runs before its own dynamics, on the Reference platform.
 
         Args:
-            * n (int): Number of frames to keep
+            * x0 (numpy.ndarray of shape (n_atoms, 3) or None): Starting positions in nanometres;
+                None uses reference_positions (default is None)
 
         Returns:
-            * x (torch.Tensor of shape (n, dim)): The non-equilibrium samples
+            * x (torch.Tensor of shape (dim,)): The minimised structure, in nanometres
         """
         import openmm
 
-        # OpenMM's Reference platform, the one that is bit-reproducible, minimising first as the
-        # protocol does. The seed must not be zero: OpenMM reads 0 as "draw a fresh one"
-        integrator = openmm.LangevinMiddleIntegrator(
-            self.temperature * openmm.unit.kelvin, self.friction / openmm.unit.picosecond,
-            0.001 * openmm.unit.picosecond,
-        )
-        integrator.setRandomNumberSeed(1)
-        simulation = openmm.app.Simulation(self.topology, self.system, integrator,
+        if x0 is None:
+            x0 = self.reference_positions
+        simulation = openmm.app.Simulation(self.topology, self.system,
+                                           openmm.VerletIntegrator(0.001),
                                            openmm.Platform.getPlatformByName('Reference'))
-        simulation.context.setPositions(self.reference_positions)
+        simulation.context.setPositions(x0)
         simulation.minimizeEnergy()
-        simulation.context.setVelocitiesToTemperature(self.temperature * openmm.unit.kelvin, 1)
+        state = simulation.context.getState(getPositions=True)
+        positions = state.getPositions(asNumpy=True)._value.reshape(-1)
+        return torch.as_tensor(positions, dtype=self.dtype, device=self.device)
 
-        # One trajectory, n evenly spaced frames
-        frames = []
-        for _ in range(n):
-            simulation.step(max(100000 // n, 1))
-            state = simulation.context.getState(getPositions=True)
-            frames.append(state.getPositions(asNumpy=True)._value.reshape(-1).copy())
-        x = torch.as_tensor(np.stack(frames), dtype=self.dtype, device=self.device)
-        return center(x, self.n_atoms)
+    def generate_train_samples(self, n, seed=0, x0=None, n_chains=1000, n_steps=10000, thin=50,
+                               temperatures=None, restrain_steps=2000, restraint=20.0,
+                               descent_steps=500):
+        """Runs the basin recipe: short dynamics from every backbone basin, in the wrong proportions
+
+        Trajectory i starts from the energy-minimised released structure (minimised_positions).
+        Every residue with a phi or a psi draws one of train_basins with the shares
+        train_basin_shares, and set_torsions rotates its phi and psi to that basin's centre, which
+        places it in the basin without crossing a barrier. A steepest descent of descent_steps
+        steps of at most 1e-3 nm, then restrain_steps of Langevin dynamics (BAOAB, the released
+        friction, 1 fs), relax the rotation while a restraint of restraint * (1 - cos(deviation))
+        kT holds every phi and psi at its centre and every omega trans. The restraint is released,
+        and the trajectory runs n_steps at this system's temperature times factor_i, the factors
+        running geometrically over train_temperatures with the trajectory index
+        (temperature_ladder), before keeping one frame every thin steps until the trajectories hold
+        n between them. The split is those frames frame by frame, centred.
+
+        Every basin of every residue is visited, alpha-L far more often than under the target,
+        and inside a basin the shape is the target's. The recipe takes seconds on a GPU once
+        compiled, and minutes on the CPU: run it on a GPU, or with fewer trajectories.
+
+        NOTE: the restraint differentiates the torsions with autograd, like the force field itself.
+
+        Args:
+            * n (int): Number of samples
+            * seed (int): Seed of the recipe (default is 0)
+            * x0 (torch.Tensor of shape (m, dim) or None): Starting structures, trajectory i
+                starting from x0[i % m]; None uses the minimised released structure
+                (default is None)
+            * n_chains (int): Number of trajectories, at most n (default is 1000)
+            * n_steps (int): Steps after the release before any frame is kept, 10 ps
+                (default is 10000)
+            * thin (int): Steps between kept frames (default is 50)
+            * temperatures (tuple of two floats or None): Lowest and highest temperature factor;
+                None uses train_temperatures (default is None)
+            * restrain_steps (int): Steps of restrained dynamics, 2 ps; 0 skips the placement, the
+                descent and the restraint, which is how a split continues from x0
+                (default is 2000)
+            * restraint (float): Strength of the torsion restraint, in kT (default is 20.0)
+            * descent_steps (int): Steps of the restrained descent (default is 500)
+
+        Returns:
+            * x (torch.Tensor of shape (n, dim)): The biased samples, centred
+        """
+        gen = generator(seed, device=self.device)
+        n_chains, n_frames = chain_layout(n, n_chains)
+        if x0 is None:
+            x0 = self.minimised_positions()[None]
+        x = cycle(self.cast(x0), n_chains)
+        if temperatures is None:
+            temperatures = self.train_temperatures
+
+        # The dynamics, whose force is kT times the score
+        mass = self.masses.repeat_interleave(3)
+        kT = self.kT * temperature_ladder(n_chains, temperatures, dtype=self.dtype,
+                                          device=self.device)[:, None]
+        force = lambda y: self.kT * self.score(y)
+        run = lambda f, y, steps, **kwargs: langevin(f, y, steps, 0.001, mass, kT, self.friction,
+                                                     generator=gen, **kwargs)
+        velocities = None
+
+        if restrain_steps > 0:
+            # Every residue draws a basin, and its phi and psi take that basin's centre
+            residues = sorted(set(self.backbone_residues))
+            shares = torch.tensor(self.train_basin_shares, dtype=self.dtype, device=self.device)
+            basins = torch.multinomial(shares / shares.sum(), n_chains * len(residues),
+                                       replacement=True, generator=gen)
+            basins = basins.reshape(n_chains, len(residues))
+            centres = torch.deg2rad(torch.tensor(self.train_basins, dtype=self.dtype,
+                                                 device=self.device))
+            angles = torch.stack([centres[basins[:, residues.index(residue)], int(k >= self.n_phi)]
+                                  for k, residue in enumerate(self.backbone_residues)], -1)
+            x = self.set_torsions(x, list(range(len(self.backbone_residues))), angles)
+
+            # Hold every phi and psi at its centre and every omega trans
+            n_omega = len(self.torsion_indexes) - len(self.backbone_residues)
+            targets = torch.cat([angles, torch.full((n_chains, n_omega), math.pi,
+                                                    dtype=self.dtype, device=self.device)], -1)
+
+            def restrained_force(y):
+                with torch.enable_grad():
+                    z = y.detach().requires_grad_(True)
+                    penalty = restraint * (1 - torch.cos(self.torsions(z) - targets))
+                    (gradient,) = torch.autograd.grad(penalty.sum(), z)
+                return force(y) - self.kT * gradient
+
+            # Relax the rotation, then thermalise with the torsions held
+            x = steepest_descent(restrained_force, x, descent_steps, 1e-3)
+            x, velocities = run(restrained_force, x, restrain_steps, return_velocities=True)
+
+        # Release the torsions, then keep the frames
+        x, velocities = run(force, x, n_steps, velocities=velocities, return_velocities=True)
+        trace = run(force, x, n_frames * thin, velocities=velocities, return_trace=True, thin=thin)
+        return center(interleave(trace, n), self.n_atoms)
 
 
 def _angle_edges(n_bins, like):

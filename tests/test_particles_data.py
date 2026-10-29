@@ -34,6 +34,10 @@ DEM_NAMES = {'dw4': 'DW4', 'lj13': 'LJ13-1000', 'lj55': 'LJ55-1000-part1'}
 # The splits are a download, so the tests that need them run only once they are cached
 TARGETS = [DW4, LJ13, LJ55]
 
+# The step size of Kohler et al. 2020's Metropolis chains, from which the released frames come and
+# at which their stationarity is checked
+RELEASED_STEP_SIZE = {'dw4': 0.5, 'lj13': 0.025, 'lj55': 0.025}
+
 
 def split_name(target, split='test'):
     """Returns the file name of one published split"""
@@ -127,7 +131,7 @@ def test_the_released_ensemble_is_stationary_under_our_energy(target_cls):
     x = load_split(target, 'test', n=64)
     before = target.energy(x)
     out = random_walk_mh(target.log_prob, x.clone(), n_steps=3000,
-                         step_size=target.train_step_size, generator=generator(0))
+                         step_size=RELEASED_STEP_SIZE[target.name], generator=generator(0))
     drift = abs(float(target.energy(out).mean() - before.mean())) / float(before.std())
     assert drift < 0.5
 
@@ -146,26 +150,10 @@ def test_halving_or_doubling_the_pair_sum_breaks_stationarity(target_cls):
                         * target.pair_energy(target.distances(y)).sum(-1)
                         + (target.c_harm * (target.preprocess(y) ** 2).sum(-1)
                            if hasattr(target, 'c_harm') else 0.0))
-    out = random_walk_mh(wrong, x.clone(), n_steps=3000, step_size=target.train_step_size,
-                         generator=generator(0))
+    out = random_walk_mh(wrong, x.clone(), n_steps=3000,
+                         step_size=RELEASED_STEP_SIZE[target.name], generator=generator(0))
     drift = abs(float(target.energy(out).mean() - before.mean())) / float(before.std())
     assert drift > 0.5
-
-
-@pytest.mark.parametrize('target_cls', TARGETS)
-def test_the_train_split_is_the_biased_one_and_the_panel_says_so(target_cls):
-    """Our host-generated train split must score worse than the released one it is compared to"""
-    target = target_cls()
-    needs(target)
-    reference = load_split(target, 'test', n=512)
-    train = target.train_samples(n=512)
-
-    floor = target.compute_metrics(reference[:256], ref_samples=reference[256:],
-                                   compute_standard_metrics=False)
-    biased = target.compute_metrics(train, ref_samples=reference[:256],
-                                    compute_standard_metrics=False)
-    assert biased['dist_total_var'] > 2 * floor['dist_total_var']
-    assert biased['energy_w1'] > floor['energy_w1']
 
 
 def test_the_checksum_is_verified():

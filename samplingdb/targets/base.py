@@ -2,8 +2,10 @@
 
 # Libraries
 import hashlib
+import numpy as np
 import torch
-from ..data import cache_dir, cached_local
+from .. import data
+from ..data import cache_dir, cached_local, fetch_reference
 from ..metrics.weights import normalize_weights
 from ..metrics.standard import compute_standard_metrics as standard_metrics
 
@@ -38,6 +40,8 @@ class Target(torch.nn.Module):
         here; see compute_metrics
     * reference_folder (str or None): Cache sub-directory of the generator that writes the
         reference set, None for a target that has no generated one
+    * train_recipe (str or None): Tag of the train recipe, in the train cache key; a changed
+        recipe takes a new tag
     """
 
     truth_tier = 0
@@ -45,6 +49,7 @@ class Target(torch.nn.Module):
     default_n = DEFAULT_N
     standard_panel = False
     reference_folder = None
+    train_recipe = None
 
     # Scale a Gaussian reference distribution should use for this target, for a sampler that
     # anneals towards it. Not used by the density itself
@@ -158,47 +163,62 @@ class Target(torch.nn.Module):
         """
         return {'name': self.name, 'dim': self.dim}
 
-    def train_samples(self, n=None):
-        """Returns the bundled biased/cheap sample set, if one exists for this target
+    def train_samples(self, n=None, seed=0):
+        """Returns the train split: this target's cheap, biased recipe, published or run and cached
 
-        For host-generated splits this runs generate_train_samples() once and caches the
-        result under a spec-keyed name.
+        A train split covers what the test split covers and gets the rest wrong on purpose. On a
+        target with modes, every mode is visited and the proportions are far from the true ones;
+        elsewhere, the energy histogram spans the test split's, tails included, and the shape is
+        wrong. generate_train_samples is the same recipe, uncached, with every knob exposed: more
+        samples, another seed, longer chains, or chains continued from given configurations.
 
-        NOTE: n is not capped. Asking for more than the cached split holds regenerates it at that
-        size, under its own cache entry, so a longer run is one argument away:
+        The default split, default_n samples at seed 0, is published with the reference sets and
+        downloaded once, so every machine reads the same array. Any other n or seed runs the recipe
+        once, on the device the target lives on, and caches it:
 
-            x = target.train_samples(n=1000000)
+            x = target.train_samples(n=1000000, seed=1)
 
-        NOTE: the recipe runs on the CPU whatever device the target lives on, then the target goes
-        back to its device. A seeded stream is only the same on one device type, so this keeps the
-        cached split one array for every machine, and lets a recipe build its starting point on
-        the CPU.
+        NOTE: run the expensive recipes (the particle systems, the glasses and the peptides) with
+        the target on a GPU. torch's CPU and CUDA generators draw different streams, so a split run
+        locally is one array per device type, and the cache key carries the device type. The
+        peptides on a GPU differ between two runs of one seed as well, because their compiled
+        force sums with atomic adds and the dynamics amplify the last bits.
 
         Args:
             * n (int or None): Number of samples; None uses default_n (default is None)
+            * seed (int): Seed of the recipe (default is 0)
 
         Returns:
-            * x (torch.Tensor of shape (n, *data_shape)): The biased/cheap samples
+            * x (torch.Tensor of shape (n, *data_shape)): The biased samples
         """
         if n is None:
             n = self.default_n
-        device = self.device
-        array = cached_local(self.train_cache_key(n),
-                             lambda: self.cpu().generate_train_samples(n).cpu().numpy())
-        self.to(device)
-        return torch.as_tensor(array, dtype=self.dtype, device=device)
 
-    def train_cache_key(self, n):
-        """Returns the cache name of the host-generated train split, keyed by spec(), dtype and n
+        # The default split is the published one, the same array on every machine
+        if n == self.default_n and seed == 0 \
+                and 'train/' + self.train_key() + '.npy' in data.REFERENCE_CHECKSUMS:
+            array = np.load(fetch_reference('train', self.train_key(), ''))
+        else:
+            array = cached_local(self.train_cache_key(n, seed=seed),
+                                 lambda: self.generate_train_samples(n, seed=seed).cpu().numpy())
+        return torch.as_tensor(array, dtype=self.dtype, device=self.device)
 
-        The working dtype is in the key although it is not in spec(): a seeded generator draws a
-        different stream in float32 than in float64, so one recipe gives two different chains, and
-        DW-4's two default splits differ by up to 7.9 in a coordinate. Targets whose RECIPE
-        carries a knob the density spec does not cover must append it here, so two settings
-        cannot collide on one cache entry.
+    def train_cache_key(self, n, seed=0):
+        """Returns the cache name of the train split, keyed by spec(), dtype, device type, recipe,
+        seed and n
+
+        The working dtype and the device type are in the key although they are not in spec(): a
+        seeded generator draws a different stream in float32 than in float64, and on a GPU than
+        on the CPU, so one recipe gives several different chains. train_recipe versions the recipe
+        itself, so a changed recipe is a cache miss rather than an old split read back.
         """
         return ('train_' + self.name + '_' + spec_id(self.spec()) + '_'
-                + str(self.dtype).replace('torch.', '') + '_n' + str(n))
+                + str(self.dtype).replace('torch.', '') + '_' + self.device.type + '_'
+                + self.train_recipe + '_seed' + str(seed) + '_n' + str(n))
+
+    def train_key(self):
+        """Returns the file stem of the published train split: name, spec_id and recipe tag"""
+        return self.name + '_' + spec_id(self.spec()) + '_' + self.train_recipe
 
     def reference_key(self):
         """Returns the file stem of the generated reference set, its name and spec_id
@@ -212,8 +232,27 @@ class Target(torch.nn.Module):
         """Returns the cache path of the generated reference set, whether or not it is there"""
         return cache_dir() / self.reference_folder / (self.reference_key() + '.npy')
 
-    def generate_train_samples(self, n):
-        """Runs this target's documented locally-correct-globally-short recipe"""
+    def generate_train_samples(self, n, seed=0, x0=None):
+        """Runs this target's documented train recipe, uncached, on the target's device
+
+        Every subclass states its recipe -- starting points, kernel, step size, number of steps --
+        in its own docstring and exposes its knobs as keyword arguments. They share n, seed and
+        x0, whose rows replace the recipe's starting points (chain i starts from
+        x0[i % len(x0)]). A split keeps its chains frame by frame (see interleave), so its last
+        n_chains rows are the last state of every chain, in chain order, and a split continues
+        from where another one ended with
+
+            more = target.generate_train_samples(n, x0=x[-n_chains:])
+
+        Args:
+            * n (int): Number of samples
+            * seed (int): Seed of the recipe (default is 0)
+            * x0 (torch.Tensor of shape (m, *data_shape) or None): Starting points; None uses
+                the recipe's own (default is None)
+
+        Returns:
+            * x (torch.Tensor of shape (n, *data_shape)): The biased samples
+        """
         raise NotImplementedError('generate_train_samples is not implemented.')
 
     def test_samples(self, n=None, seed=None):
@@ -350,6 +389,35 @@ class ExactTarget(Target):
         if n is None:
             n = self.default_n
         return self.sample((n,), generator=generator(seed))
+
+
+def cycle(x0, n):
+    """Returns n rows of x0, row i being x0[i % len(x0)]: the starting point of chain i"""
+    return x0[torch.arange(n, device=x0.device) % len(x0)].clone()
+
+
+def chain_layout(n, n_chains):
+    """Returns how many chains hold n samples and how many states each keeps
+
+    Args:
+        * n (int): Number of samples
+        * n_chains (int): Largest number of chains
+
+    Returns:
+        * n_chains (int): Number of chains, at most n
+        * n_frames (int): States kept per chain, so that n_chains * n_frames >= n
+    """
+    n_chains = min(n, n_chains)
+    return n_chains, -(-n // n_chains)
+
+
+def interleave(trace, n):
+    """Flattens a (n_frames, n_chains, dim) trace frame by frame and keeps its first n rows
+
+    Frame-major order puts one state of every chain before the second of any, so any prefix of a
+    split holds every chain, and with it every temperature of a ladder.
+    """
+    return trace.reshape(-1, trace.shape[-1])[:n]
 
 
 def generator(seed, device=None):

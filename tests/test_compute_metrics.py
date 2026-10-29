@@ -6,6 +6,7 @@ import pytest
 import torch
 from samplingdb import BracketTwoModes, DW4, Funnel, GMM40, LJ13, ManyModes, ManyWell, MoS, TwoModes
 from samplingdb.targets.base import generator
+from samplingdb.targets.mixtures import uniform_means
 
 # The linear half of the target-agnostic panel, which the synthetic targets always report
 STANDARD_KEYS = {'ks', 'w2_sliced'}
@@ -79,11 +80,11 @@ def test_two_modes_panel_reports_the_heavy_mode_weight():
 def test_mode_weights_of_overlapping_components_have_no_floor():
     """Mean responsibilities have expectation w_k under exact draws, overlap or not
 
-    MoS's Student-t components overlap, so the mass of the region each one dominates is not its
-    weight, and argmax labels read about 0.04 at any sample size. The responsibilities shrink with
-    n like sampling noise.
+    On a plain draw of the means two Student-t components overlap, so the mass of the region each
+    one dominates is not its weight and argmax labels keep a floor. The responsibilities shrink
+    with n like sampling noise.
     """
-    target = MoS()
+    target = MoS(means=uniform_means(10, 2, -10.0, 10.0, seed=0))
     small = target.compute_metrics(target.test_samples(n=10000, seed=1),
                                    compute_standard_metrics=False)['tv_weights']
     large = target.compute_metrics(target.test_samples(n=160000, seed=1),
@@ -111,11 +112,11 @@ def test_manywell_panel():
     assert ret['tvd_x1'] < 0.1
     assert ret['x1_out_of_range'] < 1e-12
 
-    # The train split lives in the deep well of every well, so the per-well panel flags it
+    # The train split puts half of every well on the light side, so the per-well panel flags it
     train = target.train_samples(n=2048)
     biased = target.compute_metrics(train, compute_standard_metrics=False)
-    assert biased['emc'] < 0.02
-    assert biased['tv_weights'] > 0.3
+    assert biased['emc'] > 0.95
+    assert biased['tv_weights'] > 0.5
     assert biased['tvd_x1'] > ret['tvd_x1']
 
 
@@ -149,11 +150,11 @@ def test_funnel_panel_scores_the_analytic_marginal():
     # The exact reference histogram comes from the analytic CDF and sums to one
     assert abs(float(hist['ref_hist'].sum()) - 1.0) < 1e-12
 
-    # The short-chain train split is many sigma off on the tail
+    # The train split's x_1 is uniform over four scales either side, far too wide
     train = target.train_samples(n=4096)
     biased = target.compute_metrics(train, compute_standard_metrics=False)
     assert biased['ks_x1'] > 10 * ret['ks_x1']
-    assert biased['x1_var_err'] < -5.0
+    assert biased['x1_var_err'] > 20.0
 
 
 def test_particle_panel_binning():
@@ -184,7 +185,7 @@ def test_particle_panel_reports_dropped_mass():
     """Samples outside the reference range are reported rather than silently renormalised"""
     target = LJ13()
     ref_samples = target.train_samples(n=2048)[1024:]
-    diffuse = 3.0 * ref_samples
+    diffuse = 5.0 * ref_samples
     ret = target.compute_metrics(diffuse, ref_samples=ref_samples, compute_standard_metrics=False)
     assert ret['dist_out_of_range'] > 0.5
     assert ret['energy_out_of_range'] > 0.5

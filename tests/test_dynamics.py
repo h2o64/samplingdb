@@ -4,8 +4,7 @@
 import pytest
 import torch
 from samplingdb.targets.base import generator
-from dynamics import harmonic_log_prob, harmonic_score, masses, minimised_positions, \
-    run_batched_dynamics
+from dynamics import harmonic_log_prob, harmonic_score, run_batched_dynamics
 from test_molecular import has_pdb, has_split, needs_openmm, peptide, reference_ensemble
 
 
@@ -24,8 +23,8 @@ def test_the_batched_integrator_matches_openmms_own():
     x0 = reference_ensemble(target, n=16)
 
     # Masses come from the built system, in amu, and are what makes the dynamics physical
-    assert masses(target).shape == (target.n_atoms,)
-    assert abs(float(masses(target).sum()) - 144.17) < 0.1
+    assert target.masses.shape == (target.n_atoms,)
+    assert abs(float(target.masses.sum()) - 144.17) < 0.1
 
     x = run_batched_dynamics(target, x0, n_steps=200, step_size=0.001, generator=generator(0))
     assert x.shape == x0.shape
@@ -44,7 +43,7 @@ def test_the_batched_integrator_matches_openmms_own():
     assert torch.isfinite(velocity).all()
 
     # The thermal velocity scale is sqrt(kT / m), which fixes the kinetic energy per degree
-    kinetic = 0.5 * (masses(target).repeat_interleave(3) * velocity ** 2).sum(-1)
+    kinetic = 0.5 * (target.masses.repeat_interleave(3) * velocity ** 2).sum(-1)
     assert 0.2 < float(kinetic.mean()) / (0.5 * target.dim * target.kT) < 3.0
 
 
@@ -60,7 +59,7 @@ def test_the_harmonic_terms_split_off_cleanly_for_solute_tempering():
         pytest.skip('the topology is not cached')
     target = peptide('Ace-A-Nme')
     x = run_batched_dynamics(
-        target, minimised_positions(target).reshape(1, -1).expand(8, target.dim).contiguous(),
+        target, target.minimised_positions().reshape(1, -1).expand(8, target.dim).contiguous(),
         n_steps=500, generator=generator(0))
     positions = target.positions(x)
 
@@ -97,7 +96,7 @@ def test_carrying_velocities_makes_short_calls_one_long_trajectory():
     if not has_pdb('Ace-A-Nme'):
         pytest.skip('the topology is not cached')
     target = peptide('Ace-A-Nme')
-    x0 = minimised_positions(target).reshape(1, -1).expand(4, target.dim).contiguous()
+    x0 = target.minimised_positions().reshape(1, -1).expand(4, target.dim).contiguous()
 
     long_call = run_batched_dynamics(target, x0, n_steps=40, generator=generator(0))
 

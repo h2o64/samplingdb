@@ -51,7 +51,7 @@ MEAN_HASHES = {
     ('gmm40', 2): '5a2a3a155b1b17b71691699cdca4f84d3d7291af9ebdae6e0bf9737aec4921b1',
     ('gmm40', 50): '599bf6b2fb64f53743888e97f81995173fcb6742e24e869965c603bbff089bf8',
     ('gmm40', 200): '43ba1b1e702eee42c3b2d95f8df1e6d1e37198119dfd6ec105274aebc2fdfe6c',
-    ('mos', 2): 'a795de2725063b3278215a2a6ab52f6b7cf6605f6b5aaca34350dbeea07e7369',
+    ('mos', 2): '5e0fcb80043a52ec36af355d4217180b15a9ae7df6dad9a02ce50ded8b8851af',
     ('mos', 50): '9380d149f193fde0dff61ccf5da6f7d678691158e181756e947bdace9908a56a',
     ('mos', 200): 'd56c0472d87e1c836d1f3b654bc52c20de1ebe8ed3531a7b7bd46daae6ac0e92',
 }
@@ -74,7 +74,7 @@ def test_the_mean_matrices_are_pinned(name, dim):
 # The spec_id of every Tier 0 target as catalogued, which a build in either dtype must carry. A
 # change here is a change of density: it moves every cached split, so it has to be deliberate
 SPEC_IDS = {
-    'funnel': '556b9f8f', 'manywell': '30beb4d2', 'gmm40': 'a1f669cb', 'mos': '60299a87',
+    'funnel': '556b9f8f', 'manywell': '30beb4d2', 'gmm40': 'a1f669cb', 'mos': '3d819321',
     'twomodes': '0eddf6c9', 'brackettwomodes': '334746c8', 'manymodes-k3': 'edf2fcb2',
     'eightgaussians': 'ae0110e3', 'rings': '5deb01ff', 'checkerboard': '9547623f',
 }
@@ -145,6 +145,10 @@ def test_mos_components_are_student_t2():
     # The exact sampler's tails are far heavier than a Gaussian's
     assert float(target.test_samples(n=200000).abs().max()) > 100.0
 
+    # No two means closer than five scales, so the df = 2 tails do not merge two modes into one
+    distances = torch.cdist(target.means, target.means) + 1e9 * torch.eye(10, dtype=torch.float64)
+    assert abs(float(distances.min()) - 5.0345) < 1e-4
+
 
 def test_manywell_log_Z():
     """The 1D quadrature and the resulting log Z, checked against their pinned values"""
@@ -213,7 +217,8 @@ def test_manywell_wells_are_asymmetric():
     energy = -target.log_prob_1d(torch.as_tensor(grid)).numpy()
     assert abs(grid[grid < 0][energy[grid < 0].argmin()] + 1.7108) < 1e-3
     assert abs(grid[grid > 0][energy[grid > 0].argmin()] - 1.7525) < 1e-3
-    assert target.deep_well_bounds == (1.7, 1.8)
+    assert abs(target.well_minima[0] + 1.7108) < 1e-3
+    assert abs(target.well_minima[1] - 1.7525) < 1e-3
 
     # The exact sampler reproduces the mass split
     x = target.test_samples(n=200000)

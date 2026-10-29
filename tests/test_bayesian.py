@@ -339,25 +339,22 @@ def test_lgcp_panel_reports_the_total_intensity_and_the_field_correlation(whiten
     assert biased['neighbour_correlation_err'] > 10 * ret['neighbour_correlation_err']
 
 
-def test_the_direct_lgcp_train_split_starts_from_the_prior():
-    """The chains start from N(mu, K), since a N(0, I) start sits 3.9 below the prior mean
-
-    From N(0, I), 500 steps ended at a total intensity of 1.8 against the 126 observed pines.
-    """
+def test_the_lgcp_train_chains_start_from_the_prior():
+    """The chains start from N(mu, K): a N(0, I) start sits 3.2 reference sds from the means"""
     if not has_dataset('pines.csv'):
         pytest.skip('the pines dataset is not cached')
     target = LGCP()
-    train = target.generate_train_samples(64)
+    start = target.train_starts(4096, generator=generator(0))
+    assert float((start.mean(0) - target.mean).abs().mean()) < 0.1
 
-    # The documented start, seed 0 mapped through the prior, and chains that leave it: 0.67 per
-    # coordinate (rms) was measured, where a different start would sit ~4 away
-    z = torch.randn(64, target.dim, generator=generator(0), dtype=torch.float64)
-    start = z @ target.cholesky.T + target.mean
-    assert 0.3 < float(((train - start) ** 2).mean().sqrt()) < 1.5
+    # Whitened by the Cholesky factor, the draws are standard normal
+    z = torch.linalg.solve_triangular(target.cholesky, (start - target.mean).T, upper=False).T
+    assert abs(float(z.var()) - 1.0) < 0.02
 
-    # And the field stays where the counts put it rather than near zero
-    intensity = (target.area * torch.exp(train)).sum(-1).mean()
-    assert 100.0 < float(intensity) < 150.0
+    # The whitened geometry starts from N(0, I) itself
+    whitened = LGCP(whitened=True)
+    assert torch.equal(whitened.train_starts(8, generator=generator(0)),
+                       torch.randn(8, target.dim, generator=generator(0), dtype=torch.float64))
 
-    # The recipe is in the cache key, so a split cached under the old start is not read back
-    assert target.train_cache_key(64).endswith('_' + target.train_recipe)
+    # The recipe is in the cache key, so a split cached under an older recipe is not read back
+    assert target.train_recipe in target.train_cache_key(64)

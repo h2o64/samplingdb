@@ -9,8 +9,8 @@ from torch.nn.functional import softplus
 from ..data import fetch_reference, fetch_url, read_rows
 from ..metrics.weights import normalize_weights
 from ..metrics.wasserstein import wasserstein_distance_1d
-from .base import Target, generator
-from .kernels import mala
+from .base import Target, chain_layout, cycle, generator, interleave
+from .kernels import temperature_ladder, tempered_mala
 
 # The datasets are published in the variational_sampling_methods hub, pinned to a commit
 VSM_COMMIT = '32de62189abe07e96742735d91adbb959692d8c3'
@@ -90,6 +90,12 @@ class BayesianTarget(Target):
     truth_tier = 2
     reference_folder = 'stan'
     generator_command = 'stan/generate.py --target <name>'
+    train_recipe = 'tempered-mala'
+
+    # Lowest and highest temperature factor of the train chains. Below 1 the chains reach past
+    # the low end of the test energies; the upper end, well above 1, makes the split overdispersed
+    # in every coordinate
+    train_temperatures = (0.8, 3.0)
 
     def test_samples(self, n=None, seed=None):
         """Returns Stan's reference draws, in the same unconstrained coordinates as log_prob
@@ -116,28 +122,60 @@ class BayesianTarget(Target):
         array = read_rows(path, n, command + ' --n_samples <n>')
         return torch.as_tensor(array, dtype=self.dtype, device=self.device)
 
-    def generate_train_samples(self, n):
-        """Runs the short-chain recipe
+    def train_starts(self, n, generator=None):
+        """Draws the starting points of the train chains, N(0, prior_scale^2 I)
 
-        One 500-step MALA chain per sample at the class's train_step_size (0.002 for the logistic
-        regressions and Brownian, 0.005 for Seeds), seed 0, each started from an independent
-        N(0, prior_scale^2 I) draw (prior_scale 1 for the logistic regressions and Brownian, 2 for
-        Seeds). That start is the prior of the logistic regressions at sigma_w = 1 and is narrower
-        than the priors of Seeds and Brownian; LGCP starts from its own prior instead (see
-        LGCP.generate_train_samples). The split is marked informal: it has no evaluation role, only
-        a possible warm-start one. The observed data these posteriors condition on is on the target
-        itself, which is this tier's real 'train' set.
+        prior_scale is 1 for the logistic regressions, whose prior that is, and 2 for Seeds.
 
         Args:
-            * n (int): Number of samples, one per chain
+            * n (int): Number of chains
+            * generator (torch.Generator or None): RNG, on the target's device (default is None)
+
+        Returns:
+            * x0 (torch.Tensor of shape (n, dim)): Starting points
+        """
+        return self.prior_scale * torch.randn(n, self.dim, generator=generator, dtype=self.dtype,
+                                              device=self.device)
+
+    def generate_train_samples(self, n, seed=0, x0=None, n_chains=1000, n_steps=1000, thin=10,
+                               temperatures=None):
+        """Runs the tempered-chains recipe: the whole posterior, overdispersed
+
+        n_chains chains start from train_starts. Chain i samples the tempered posterior
+        exp(log_prob / factor_i), the factors running geometrically over train_temperatures with
+        the chain index (temperature_ladder). Each takes n_steps MALA moves whose step size adapts
+        per chain towards 57% acceptance, then keeps one state every thin moves until the chains
+        hold n between them (tempered_mala). The split is those states frame by frame.
+
+        The posteriors are unimodal, so what the split gets wrong is the shape: the hot chains
+        make it too wide, the cold ones too narrow, and the energy histogram spans the test one
+        at both ends. The recipe takes seconds, and about a minute for either LGCP on the CPU.
+
+        Args:
+            * n (int): Number of samples
+            * seed (int): Seed of the recipe (default is 0)
+            * x0 (torch.Tensor of shape (m, dim) or None): Starting points, chain i starting from
+                x0[i % m]; None uses train_starts (default is None)
+            * n_chains (int): Number of chains, at most n (default is 1000)
+            * n_steps (int): Adaptation moves per chain before any state is kept
+                (default is 1000)
+            * thin (int): Moves between kept states (default is 10)
+            * temperatures (tuple of two floats or None): Lowest and highest temperature factor;
+                None uses train_temperatures (default is None)
 
         Returns:
             * x (torch.Tensor of shape (n, dim)): The biased samples
         """
-        gen = generator(0)
-        x0 = self.prior_scale * torch.randn(n, self.dim, generator=gen, dtype=self.dtype)
-        return mala(self.log_prob, self.score, x0, n_steps=500, step_size=self.train_step_size,
-                    generator=gen)
+        gen = generator(seed, device=self.device)
+        n_chains, n_frames = chain_layout(n, n_chains)
+        if x0 is None:
+            x0 = self.train_starts(n_chains, generator=gen)
+        if temperatures is None:
+            temperatures = self.train_temperatures
+        factors = temperature_ladder(n_chains, temperatures, dtype=self.dtype, device=self.device)
+        trace = tempered_mala(self.log_prob, self.score, cycle(self.cast(x0), n_chains), factors,
+                              n_steps, n_frames, thin, generator=gen)
+        return interleave(trace, n)
 
     def compute_metrics(self, samples, weights=None, ref_samples=None,
                         compute_standard_metrics=True, skip_costly_metrics=True, generator=None,
@@ -148,8 +186,7 @@ class BayesianTarget(Target):
         per parameter, and a sampler that gets those right on every coordinate has done the job.
 
         NOTE: both standard deviations divide by n, since a weighted variance has no n - 1 to divide
-        by. With n - 1 on the reference side alone, a set scored against itself would read
-        max_std_ratio_err = 1 - sqrt((n - 1) / n) instead of 0.
+        by, so a set scored against itself reads max_std_ratio_err = 0.
 
         Arguments and returns are Target.compute_metrics'; the histogram is a dict of 'mean',
         'ref_mean', 'std' and 'ref_std', one entry per coordinate.
@@ -225,7 +262,6 @@ class LogisticRegression(BayesianTarget):
     validate these.
     """
 
-    train_step_size = 0.002
     prior_scale = 1.0
 
     def __init__(self, dataset='ionosphere', sigma_w=1.0, dtype=torch.float64):
@@ -313,11 +349,6 @@ class LogisticRegression(BayesianTarget):
         the number of data points. Each data point averages its likelihood over the samples before
         the logarithm, so the estimate converges as the sample count grows.
 
-        NOTE: the log of the averaged JOINT likelihood, log sum_s w_s prod_i p(y_i | x_s), does not
-        converge: its sum is dominated by the best few samples, and the more samples there are the
-        better those get. On sonar's reference draws it moves from -0.2876 at 10 samples to -0.2630
-        at 10^5, where the lppd reads -0.2314 and -0.2311.
-
         Args:
             * x (torch.Tensor of shape (n, dim)): Samples
             * weights (torch.Tensor of shape (n,)): Weights of the samples (default is None)
@@ -377,7 +408,6 @@ class Seeds(BayesianTarget):
     rather than trusting the default.
     """
 
-    train_step_size = 0.005
     prior_scale = 2.0
     n_groups = 21
 
@@ -470,16 +500,18 @@ class Brownian(BayesianTarget):
     NOTE: the reference set is EXACT, not MCMC. Given the two scales the posterior is Gaussian in
     the 30 locations, so gen/exact/brownian.py draws the log scales by rejection from their priors
     with the marginal likelihood as the acceptance ratio, then the locations from their Gaussian
-    conditional, after checking that this factorisation equals log_prob within 1e-10. A 4-chain NUTS
-    run under-sampled the left tail of log alpha_obs (sd 0.426 against 0.468, P(< -5) 0.0007
-    against 0.0034) with zero divergences, which no Stan diagnostic flagged.
+    conditional, after checking that this factorisation equals log_prob up to one constant, to
+    1e-8.
     """
 
     reference_folder = 'exact'
     generator_command = 'exact/brownian.py'
-    train_step_size = 0.002
     prior_scale = 1.0
     n_steps = 30
+
+    # A lower hot end than the other posteriors: tempering the vague LogNormal(0, 2) scale priors
+    # further lets the innovation scale roam over orders of magnitude
+    train_temperatures = (0.8, 1.5)
 
     def __init__(self, dtype=torch.float64):
         """Builds the Brownian motion posterior"""
@@ -494,6 +526,39 @@ class Brownian(BayesianTarget):
         """Splits the flat vector into (log_alpha_inn, log_alpha_obs, locations)"""
         return x[:, 0], x[:, 1], x[:, 2:]
 
+    def train_starts(self, n, generator=None):
+        """Draws the starting points of the train chains, across both funnels
+
+        The lowest energies sit in the neck of the observation scale, where every observed location
+        is close to its observation and where a chain started at the prior does not go. So
+        log alpha_inn starts uniform on [-4, 0] and log alpha_obs uniform on [-7, 0], the observed
+        locations at their observations plus noise of scale alpha_obs, and the unobserved middle
+        on the straight line between its two observed ends plus noise of scale alpha_inn. Every
+        start is built from the data the posterior conditions on, never from the reference.
+
+        Args:
+            * n (int): Number of chains
+            * generator (torch.Generator or None): RNG, on the target's device (default is None)
+
+        Returns:
+            * x0 (torch.Tensor of shape (n, dim)): Starting points
+        """
+        u = torch.rand(n, 2, generator=generator, dtype=self.dtype, device=self.device)
+        log_inn, log_obs = -4.0 + 4.0 * u[:, 0], -7.0 + 7.0 * u[:, 1]
+
+        # The observations, with the gap filled by the line between its two ends
+        missing = (~self.observed).nonzero()[:, 0]
+        before, after = missing[0] - 1, missing[-1] + 1
+        fraction = (torch.arange(self.n_steps, device=self.device) - before) / (after - before)
+        path = torch.where(self.observed, self.y,
+                           (1 - fraction) * self.y[before] + fraction * self.y[after])
+
+        # The noise of each location is its own scale
+        scale = torch.where(self.observed, torch.exp(log_obs)[:, None], torch.exp(log_inn)[:, None])
+        locations = path + scale * torch.randn(n, self.n_steps, generator=generator,
+                                               dtype=self.dtype, device=self.device)
+        return torch.cat([log_inn[:, None], log_obs[:, None], locations], dim=-1)
+
     def compute_parameter_metrics(self, samples, ref_samples, mean, ref_mean, ref_std,
                                   weights=None):
         """Returns the errors on the two scales, the unobserved middle, and the observed locations
@@ -503,11 +568,9 @@ class Brownian(BayesianTarget):
         funnel, and the ten unobserved middle steps are constrained only through the random walk,
         so they are where a sampler that has the scales slightly wrong shows it most.
 
-        NOTE: inference_gym's published ground truth for this model (innovation scale 0.11985,
-        observation scale 0.10105) is off by up to 0.31 posterior standard deviations;
-        tensorflow/probability issue 1992 reports the same discrepancy, and the exact reference
-        here gives scale means of 0.1156 and 0.1127. Read these errors against the exact
-        reference.
+        NOTE: inference_gym's published ground truth for this model is off by up to 0.31 posterior
+        standard deviations in the two scales (tensorflow/probability issue 1992), so these errors
+        are measured against the exact reference.
         """
         middle = torch.as_tensor([index for index, value in enumerate(BROWNIAN_OBSERVED)
                                   if value is None], device=samples.device) + 2
@@ -574,12 +637,10 @@ class LGCP(BayesianTarget):
     NOTE: whitened=False, the default, is what Blessing et al. 2024 ran, and the whitened
     parameterisation x = L e + mu is a DIFFERENT geometry whose numbers do not compare -- it
     carries its own name for that reason. Both are catalogued and both have a Stan reference set of
-    100 000 draws from 16 chains. The direct parameterisation needs a dense 1600 x 1600 triangular
-    solve per gradient, and its run took 29 hours against 30 minutes for the whitened one.
+    100 000 draws from 16 chains. The direct parameterisation needs dense 1600 x 1600 triangular
+    solves in log_prob and score, which makes it the slower of the two.
     """
 
-    train_step_size = 0.0005
-    train_recipe = 'mala-from-prior'
     prior_scale = 1.0
 
     def __init__(self, n_grid=40, signal_variance=1.91, beta=1.0 / 33.0, whitened=False,
@@ -626,38 +687,23 @@ class LGCP(BayesianTarget):
             return x @ self.cholesky.T + self.mean
         return x
 
-    def train_cache_key(self, n):
-        """Appends the recipe tag, which the density spec does not cover"""
-        return super().train_cache_key(n) + '_' + self.train_recipe
+    def train_starts(self, n, generator=None):
+        """Draws the starting points of the train chains from the Gaussian prior N(mu, K)
 
-    def generate_train_samples(self, n):
-        """Runs the short-chain recipe from draws of the Gaussian prior
-
-        One 500-step MALA chain per sample at step size 0.0005, seed 0, each started from an
-        independent draw of the prior N(mu, K): z ~ N(0, I) in the whitened parameterisation, and
-        mu + L z in the direct one, L the Cholesky factor of K and mu_i = 3.88. A N(0, I) start in
-        the direct parameterisation sits 3.2 reference standard deviations from the reference
-        means on average, and 500 steps at this size do not close that gap: those chains end at a
-        total intensity of 1.8 against the reference's 125.
-
-        Measured on 512 direct chains from the prior: every chain accepts more than 99.6% of its
-        moves and travels 0.67 per coordinate (rms), against a posterior standard deviation of
-        about 1.25, so the split stays close to the prior. Its total intensity reads 118 against
-        125, and its means sit 0.36 reference standard deviations from the reference's on average
-        and 4.2 at worst.
+        z ~ N(0, I) in the whitened parameterisation, mu + L z in the direct one, L the Cholesky
+        factor of K, so the direct parameterisation starts where its prior puts the field.
 
         Args:
-            * n (int): Number of samples, one per chain
+            * n (int): Number of chains
+            * generator (torch.Generator or None): RNG, on the target's device (default is None)
 
         Returns:
-            * x (torch.Tensor of shape (n, dim)): The biased samples
+            * x0 (torch.Tensor of shape (n, dim)): Starting points
         """
-        gen = generator(0)
-        x0 = torch.randn(n, self.dim, generator=gen, dtype=self.dtype)
-        if not self.whitened:
-            x0 = x0 @ self.cholesky.T + self.mean
-        return mala(self.log_prob, self.score, x0, n_steps=500, step_size=self.train_step_size,
-                    generator=gen)
+        z = torch.randn(n, self.dim, generator=generator, dtype=self.dtype, device=self.device)
+        if self.whitened:
+            return z
+        return z @ self.cholesky.T + self.mean
 
     def compute_parameter_metrics(self, samples, ref_samples, mean, ref_mean, ref_std,
                                   weights=None):
@@ -672,10 +718,7 @@ class LGCP(BayesianTarget):
         NOTE: the neighbour covariance is the mean of (x_i - m_i)(x_j - m_j) over horizontally and
         vertically adjacent cells, with m the REFERENCE's field mean on both sides, so it measures
         the correlation structure of the field and needs no mean estimated from the samples. A
-        mean error still enters it, at second order. The raw product x_i x_j it replaces is 16.0 on
-        the reference draws, 15.4 of which is the squared field mean, so it repeated max_mean_err.
-        Between two halves of 2000 reference draws neighbour_correlation_err reads 0.0016, and the
-        train split reads 0.52.
+        mean error still enters it, at second order.
         """
         mass = normalize_weights(weights, n=len(samples), dtype=samples.dtype,
                                  device=samples.device)

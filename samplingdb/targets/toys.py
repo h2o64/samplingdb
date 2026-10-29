@@ -3,8 +3,7 @@
 # Libraries
 import math
 import torch
-from .kernels import random_walk_mh
-from .base import ExactTarget, generator
+from .base import ExactTarget
 from .mixtures import log_prob_gaussian
 from .modes import ModeCoverage
 
@@ -111,25 +110,18 @@ class Rings(ModeCoverage, ExactTarget):
         radius = torch.linalg.norm(x, dim=-1)
         return torch.argmin((radius[:, None] - self.radii).abs(), dim=-1)
 
-    def generate_train_samples(self, n):
-        """Runs the one-chain-per-ring recipe
+    def sample_modes(self, modes, generator=None):
+        """Draws one exact sample from each given ring, on the device of modes"""
+        radius = self.radii[modes] + self.scale * torch.randn(
+            len(modes), generator=generator, dtype=self.dtype, device=modes.device)
+        angle = 2 * math.pi * torch.rand(len(modes), generator=generator, dtype=self.dtype,
+                                         device=modes.device)
+        return torch.stack([radius * torch.cos(angle), radius * torch.sin(angle)], dim=-1)
 
-        Chains are spread evenly over the rings, each starting at a uniformly drawn point of its
-        own ring, and take 200 Metropolis steps of size scale -- enough to travel around a ring
-        but far too small to cross the gap between two. Every ring is therefore covered, with the
-        right width, and the ring weights are wrong in the same way the mixtures' are.
-
-        Args:
-            * n (int): Number of samples, one per chain
-
-        Returns:
-            * x (torch.Tensor of shape (n, 2)): The biased samples
-        """
-        gen = generator(0)
-        radius = self.radii.cpu()[torch.arange(n) % self.n_modes]
-        angle = 2 * math.pi * torch.rand(n, generator=gen, dtype=self.dtype)
-        x0 = torch.stack([radius * torch.cos(angle), radius * torch.sin(angle)], dim=-1)
-        return random_walk_mh(self.log_prob, x0, n_steps=200, step_size=self.scale, generator=gen)
+    @property
+    def train_step_size(self):
+        """Returns the ring width, the scale of the radial profile a train chain moves through"""
+        return self.scale
 
 
 class Checkerboard(ModeCoverage, ExactTarget):
@@ -147,6 +139,10 @@ class Checkerboard(ModeCoverage, ExactTarget):
     """
 
     truth_tier = 0
+
+    # Proposal scale of the train chains, a quarter of a square's side. The squares meet at their
+    # corners, so a longer chain leaks across them and relaxes the allocation of its modes
+    train_step_size = 0.5
 
     def __init__(self, width=4, unequilibrated=True, prior_scale=4.0, dtype=torch.float64):
         """Builds the checkerboard
@@ -216,25 +212,8 @@ class Checkerboard(ModeCoverage, ExactTarget):
         """Returns the index of the square each point falls in, and 0 for points off the board"""
         return self.inside(x).to(self.dtype).argmax(dim=-1)
 
-    def generate_train_samples(self, n):
-        """Runs the one-chain-per-square recipe
-
-        Chains are spread evenly over the squares, each starting at its own square's centre, and
-        take 200 Metropolis steps of size 0.5. A step that leaves the board is rejected.
-
-        NOTE: the squares meet at their CORNERS, and a 0.5 step crosses a corner diagonally often
-        enough that the weights partly equilibrate rather than staying at the uniform allocation:
-        measured heavy-to-light ratio 1.84 against the true 3.0 at n = 2048, i.e. tv_weights 0.21
-        where an exact draw of the same size reads 0.06. So this split is a partly-relaxed chain,
-        not a frozen one -- which is exactly the failure a real sampler with too short a run has.
-
-        Args:
-            * n (int): Number of samples, one per chain
-
-        Returns:
-            * x (torch.Tensor of shape (n, 2)): The biased samples
-        """
-        gen = generator(0)
-        centre = self.low.cpu() + 1.0
-        x0 = centre[torch.arange(n) % self.n_modes]
-        return random_walk_mh(self.log_prob, x0, n_steps=200, step_size=0.5, generator=gen)
+    def sample_modes(self, modes, generator=None):
+        """Draws one uniform point in each given square, on the device of modes"""
+        unit = torch.rand(len(modes), 2, generator=generator, dtype=self.dtype,
+                          device=modes.device)
+        return self.low[modes] + 2.0 * unit
